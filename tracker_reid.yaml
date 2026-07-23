@@ -1,0 +1,24 @@
+# Ultralytics BoT-SORT config, tuned for this project's persistent-ID feature.
+# Copied from ultralytics/cfg/trackers/botsort.yaml with with_reid enabled.
+
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 90
+match_thresh: 0.8
+fuse_score: True
+
+# GMC (camera-motion compensation) disabled: this is a fixed CCTV camera with
+# no pan/shake, and sparseOptFlow was measured to cost ~40-70ms/frame on a
+# full-res frame for zero benefit on a static camera (see profiling notes).
+gmc_method: none
+
+# ReID: use the detector's own backbone features (no extra model download).
+# This handles short-term occlusion/re-matching inside the tracker itself.
+# Longer-term "left frame and came back later" re-identification is handled
+# separately in human_detection.py via a session-long embedding gallery.
+proximity_thresh: 0.5
+appearance_thresh: 0.75
+with_reid: True
+model: auto

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Human Detection Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <h1>Human Detection Dashboard</h1>
+      <span class="live-indicator" id="conn-indicator" title="Connection status">
+        <span class="dot"></span>Live
+      </span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="live" role="tab" aria-selected="true">Live</button>
+      <button class="tab-btn" data-tab="occupancy" role="tab" aria-selected="false">Occupancy</button>
+      <button class="tab-btn" data-tab="history" role="tab" aria-selected="false">History</button>
+      <button class="tab-btn" data-tab="zones" role="tab" aria-selected="false">Zones</button>
+      <button class="tab-btn" data-tab="people" role="tab" aria-selected="false">People</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-live" class="tab-panel active">
+      <div class="live-toolbar">
+        <button id="start-stop-btn" class="start-stop-btn" data-state="unknown">Start</button>
+        <span class="detector-status" id="detector-status"></span>
+      </div>
+      <div class="video-frame">
+        <img id="video" src="/video_feed" alt="Live detection feed">
+      </div>
+    </section>
+
+    <section id="tab-occupancy" class="tab-panel">
+      <div class="stat-row">
+        <div class="stat-card">
+          <span class="stat-icon">&#128101;</span>
+          <div class="stat-text">
+            <span class="stat-label">Current count</span>
+            <span class="stat-value" id="occ-count">-</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon">&#9889;</span>
+          <div class="stat-text">
+            <span class="stat-label">Detector FPS</span>
+            <span class="stat-value" id="occ-fps">-</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon">&#9673;</span>
+          <div class="stat-text">
+            <span class="stat-label">Status</span>
+            <span class="stat-value" id="occ-status">-</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-icon">&#128101;</span>
+          <div class="stat-text">
+            <span class="stat-label">Unique persons</span>
+            <span class="stat-value" id="occ-unique">-</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h2>Saved persons</h2>
+        <button id="reset-btn" class="reset-btn">Reset saved persons</button>
+      </div>
+      <div class="table-wrap">
+        <table id="occ-table">
+          <thead><tr><th>Person</th><th>Status</th><th>Since</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="occ-empty" hidden>No saved persons yet</div>
+      </div>
+    </section>
+
+    <section id="tab-history" class="tab-panel">
+      <div class="section-head">
+        <h2>Recent events</h2>
+        <button id="hist-reset-btn" class="reset-btn">Reset history</button>
+      </div>
+      <div class="table-wrap">
+        <table id="hist-table">
+          <thead><tr><th>Time</th><th>Person</th><th>Event</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="hist-empty" hidden>No events recorded yet</div>
+      </div>
+    </section>
+
+    <section id="tab-zones" class="tab-panel">
+      <div class="section-head">
+        <h2>Define zones</h2>
+      </div>
+
+      <div class="zone-toolbar">
+        <div class="zone-type-select">
+          <button class="type-btn active" data-type="door">Door</button>
+          <button class="type-btn" data-type="wall">Wall</button>
+          <button class="type-btn" data-type="window">Window</button>
+        </div>
+        <input type="text" id="zone-name" placeholder="Zone name" maxlength="40">
+        <select id="zone-task-select" title="Alert task">
+          <option value="none">No task</option>
+          <option value="alert_entry">Alert on entry</option>
+          <option value="alert_presence">Alert on presence</option>
+        </select>
+        <button id="zone-undo-btn">Undo point</button>
+        <button id="zone-clear-btn">Clear</button>
+        <button id="zone-save-btn" class="reset-btn">Save zone</button>
+      </div>
+
+      <div class="zone-canvas-wrap">
+        <img id="zone-snapshot" alt="Snapshot for zone drawing">
+        <canvas id="zone-canvas"></canvas>
+      </div>
+
+      <div class="section-head">
+        <h2>Saved zones</h2>
+      </div>
+      <div class="table-wrap">
+        <table id="zone-table">
+          <thead><tr><th>Name</th><th>Type</th><th>Points</th><th>Task</th><th>Alert</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="zone-empty" hidden>No zones defined yet</div>
+      </div>
+    </section>
+
+    <section id="tab-people" class="tab-panel">
+      <div class="section-head">
+        <h2>Live people</h2>
+        <span class="stat-label">Click a box to assign a name</span>
+        <label class="track-color-picker" title="Track border color">
+          Track color
+          <input type="color" id="track-color-input">
+        </label>
+      </div>
+
+      <div class="zone-canvas-wrap">
+        <img id="people-snapshot" alt="Live snapshot for naming people">
+        <canvas id="people-canvas"></canvas>
+      </div>
+
+      <div id="people-name-form" class="zone-toolbar" hidden>
+        <span id="people-selected-label"></span>
+        <input type="text" id="people-name-input" placeholder="Name" maxlength="40">
+        <button id="people-save-btn" class="reset-btn">Save name</button>
+        <button id="people-cancel-btn">Cancel</button>
+      </div>
+
+      <div class="section-head">
+        <h2>Named people</h2>
+      </div>
+      <div class="table-wrap">
+        <table id="people-table">
+          <thead><tr><th>Person</th><th>Name</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="people-empty" hidden>No names assigned yet</div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

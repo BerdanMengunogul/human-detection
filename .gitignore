@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+*.output
+*.log
+*.pt
+*.onnx
+.env
+.claude/scheduled_tasks.lock

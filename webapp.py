@@ -115,6 +115,7 @@ def _load_zones_file():
 def _save_zones_file(data):
     with open(hd.ZONES_PATH, "w") as f:
         json.dump(data, f, indent=2)
+    hd.bump_zones_version()
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -243,6 +243,9 @@ EXIT_GRACE_SECONDS = 1.0
 # real departure. If no zones are configured, gating is skipped entirely and
 # ENTER/EXIT fall back to plain appear/disappear behavior.
 ZONES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "door_zones.json")
+ZONES_VERSION_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "door_zones.version"
+)
 PEOPLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "people.json")
 GALLERY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gallery.npz")
 
@@ -298,6 +301,25 @@ class PeopleStore:
 PEOPLE_STORE = PeopleStore()
 
 
+def read_zones_version():
+    """Cheap counter written by the webapp whenever door_zones.json changes."""
+    if not os.path.isfile(ZONES_VERSION_PATH):
+        return 0
+    try:
+        with open(ZONES_VERSION_PATH, "r") as f:
+            return int(f.read().strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def bump_zones_version():
+    """Increment the zones version counter (called from webapp zone-save endpoints)."""
+    version = read_zones_version() + 1
+    with open(ZONES_VERSION_PATH, "w") as f:
+        f.write(str(version))
+    return version
+
+
 def load_web_zones(zones_path=ZONES_PATH):
     """Load dashboard-drawn polygon zones as a list of
     {id, name, task, points: [(x, y), ...]} dicts, in original-frame pixel
@@ -315,6 +337,36 @@ def load_web_zones(zones_path=ZONES_PATH):
             "points": [(p[0], p[1]) for p in zone.get("points", [])],
         })
     return zones
+
+
+def merge_zone_occupants(prev, web_zones):
+    """Keep occupancy sets for zones that still exist after a hot-reload."""
+    new_ids = {z["id"] for z in web_zones}
+    merged = {zone_id: prev[zone_id] for zone_id in new_ids if zone_id in prev}
+    for zone in web_zones:
+        merged.setdefault(zone["id"], set())
+    return merged
+
+
+class WebZonesStore:
+    """Loads web zones once and reloads only when the version counter changes."""
+
+    def __init__(self, zones_path=ZONES_PATH):
+        self._zones_path = zones_path
+        self._version = read_zones_version()
+        self._zones = load_web_zones(zones_path)
+
+    @property
+    def zones(self):
+        return self._zones
+
+    def maybe_reload(self):
+        current = read_zones_version()
+        if current == self._version:
+            return False
+        self._version = current
+        self._zones = load_web_zones(self._zones_path)
+        return True
 
 
 def point_in_polygon(x, y, points):
@@ -851,7 +903,8 @@ def run_detection(state=None, show_window=True):
     people_store = PEOPLE_STORE
     stage_timer = StageTimer() if PROFILE else None
 
-    web_zones = load_web_zones()
+    web_zones_store = WebZonesStore()
+    web_zones = web_zones_store.zones
     if web_zones:
         print(f"[ZONES] Loaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
     else:
@@ -892,6 +945,10 @@ def run_detection(state=None, show_window=True):
                 people_store.clear()
                 for zone_id in zone_occupants_prev:
                     zone_occupants_prev[zone_id] = set()
+            if web_zones_store.maybe_reload():
+                web_zones = web_zones_store.zones
+                zone_occupants_prev = merge_zone_occupants(zone_occupants_prev, web_zones)
+                print(f"[ZONES] Reloaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
             ret, frame = reader.read()
             if not ret or frame is None:
                 print("[WARNING] Waiting for frame from stream...")

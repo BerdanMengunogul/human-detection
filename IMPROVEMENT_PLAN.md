@@ -14,24 +14,25 @@ Work is grouped into phases so each phase ships something testable rather than o
 1.[x] **Rotate the RTSP camera password** (it's currently sitting in source + probably in `server.log`/`.output` files). Confirm with user before rotating, since it's a physical device credential.
 2.[x] Move `RTSP_URL` to an environment variable / `.env` (e.g. `python-dotenv`), read via `os environ["CAMERA_RTSP_URL"]`. Fail fast with a clear error if unset — don't fall back to a hardcoded default.
 3.[x] Add `.gitignore`: `__pycache__/`, `*.pyc`, `*.db`, `*.db-shm`, `*.db-wal`, `*.output`, `*.log`, `*.pt`, `*.onnx`, `.env`.
-4. Delete or move out of the repo: `live_test*.output`, `live_debug_run.output`, `live_verify_run.output`, `web_run.output`, `server.log`, `all_events.txt`. Check first whether any of these still hold info the user wants (git history isn't initialized here — repo isn't even a git repo yet — so deletion is final; confirm before removing).
-5. Grep all `.output`/`.log` files for the RTSP password string before deleting, in case rotation needs to also scrub distributed copies.
+4.[x] Delete or move out of the repo: `live_test*.output`, `live_debug_run.output`, `live_verify_run.output`, `web_run.output`, `server.log`, `all_events.txt`. Check first whether any of these still hold info the user wants (git history isn't initialized here — repo isn't even a git repo yet — so deletion is final; confirm before removing).
+5.[x] Grep all `.output`/`.log` files for the RTSP password string before deleting, in case rotation needs to also scrub distributed copies.
 
 **Exit criteria:** no secret in any tracked file; `git init` + first commit only after this is done, so the password never enters history.
 
 ---
 
-## Phase 1 — Fix zone gating (P0 correctness)
+## Phase 1 — Fix zone gating (P0 correctness)(DONE)
 
 Goal: ENTER/EXIT events only fire when a track's foot-point crosses into/out of a configured door zone; tracks that wander mid-room without crossing a zone don't generate events.
 
-1. Decide the model: keep **web polygon zones** (`web_zones`/door_zones.json) as the one system; the CLI rectangle `zones` param is legacy — confirm with user, then delete the rectangle path entirely (item 3 below).
-2. In the main loop, `zone_status[zone_id]["entered"]` is already computed per-frame from `occupants_now - occupants_prev`. Thread this into the enter/exit decision:
+1.[x] Decide the model: keep **web polygon zones** (`web_zones`/door_zones.json) as the one system; the CLI rectangle `zones` param is legacy — confirm with user, then delete the rectangle path entirely (item 3 below).
+2.[x] In the main loop, `zone_status[zone_id]["entered"]` is already computed per-frame from `occupants_now - occupants_prev`. Thread this into the enter/exit decision:
    - On ENTER: only call `event_log.record(person_id, "enter", ...)` when the person's foot-point actually transitioned from outside all zones to inside a designated "door" zone (or however zones are typed — check `wz["type"]` in `door_zones.json`).
    - On EXIT: symmetric — only fire when the last known position was inside a door zone before the track disappeared, or use zone-exit transition instead of pure track-disappearance.
    - If **no zones are configured**, fall back to current appear/disappear behavior (documented explicitly, not implicit) so the system still works for a bare install.
-3. Delete `point_in_any_zone` if it's genuinely superseded by `point_in_polygon` + `web_zones`, or wire it in if it was meant to gate something else — check its one call site before removing.
-4. Remove the CLI rectangle `zones` argument/parsing path once confirmed unused, to eliminate the "two systems" ambiguity per item 3 of the review.
+   - Implemented via foot-point ever-in-zone (`pending_track_zone_hit`) for ENTER and last-known in-zone (`person_in_zone`) for EXIT; all `web_zones` gate (no `type` filter yet). `zone_status["entered"]` still drives dashboard alerts.
+3.[x] Delete `point_in_any_zone` if it's genuinely superseded by `point_in_polygon` + `web_zones`, or wire it in if it was meant to gate something else — check its one call site before removing. (Replaced by `_foot_point_in_any_zone`.)
+4.[x] Remove the CLI rectangle `zones` argument/parsing path once confirmed unused, to eliminate the "two systems" ambiguity per item 3 of the review.
 
 **Test plan:** walk through a configured door zone → 1 enter event. Walk in circles inside the room without crossing a zone boundary → 0 events. Remove all zones → old appear/disappear behavior returns.
 
@@ -39,10 +40,8 @@ Goal: ENTER/EXIT events only fire when a track's foot-point crosses into/out of 
 
 ## Phase 2 — Hot-reload zones
 
-1. `web_zones = load_web_zones()` currently runs once (`human_detection.py:957`). Replace with either:
-   - **Polling**: check `door_zones.json` mtime every N frames (e.g. every 30) and reload if changed — simplest, no cross-process signaling needed.
-   - **Event-driven**: `webapp.py`'s zone-save endpoint writes a version counter or touches a sentinel file; detector polls that cheap counter instead of re-parsing JSON every frame.
-2. Preserve `zone_occupants_prev`/`zone_status` keys across a reload (don't reset occupancy state for zones that still exist, only add/remove for changed ones) so a reload mid-session doesn't spuriously fire enter/exit for people already standing in a zone.
+1.[x] `web_zones = load_web_zones()` now loads once at startup via `WebZonesStore.__init__` and reloads only when `read_zones_version()` changes. **Event-driven** chosen: `webapp.py`'s `_save_zones_file()` calls `hd.bump_zones_version()` on every create/update/delete, writing a counter file (`ZONES_VERSION_PATH`); the detection loop calls `web_zones_store.maybe_reload()` each frame (`human_detection.py:948`), which is a cheap int-file read/compare, not a JSON re-parse.
+2.[x] `zone_occupants_prev` is preserved across reload via `merge_zone_occupants` (`human_detection.py:342`) — keeps occupancy sets for zone ids that still exist, only adds/removes for changed ids.
 
 **Test plan:** create a zone in the dashboard while the detector is running; confirm it starts generating events within the poll interval without restarting the process.
 

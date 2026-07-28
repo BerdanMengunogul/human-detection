@@ -70,9 +70,9 @@ Each of these is independent; do in any order based on measured impact:
 ## Phase 5 — Reliability & concurrency
 
 1. ~~**SQLite locking**~~ — moot: `EventLog` now runs on PostgreSQL (see Phase 3 item 4) with the detector and dashboard each holding their own connection, so there's no shared-file-handle contention to work around.
-2. **RTSP reconnect**: wrap `cv2.VideoCapture` read loop — on read failure, attempt reopen with exponential backoff (e.g. 1s, 2s, 5s, 10s cap) instead of sleeping forever. Log reconnect attempts.
-3. **EXIT hold fix**: item 15 — one ambiguous pending track blocking all exits. Change the hold to be scoped per-person or per-zone rather than global (`if pending_tracks:` currently blocks everyone). At minimum, cap the hold duration so it can't block indefinitely.
-4. **ReID merge cap**: when a merge candidate would attach to a person_id that already has another *live* track, refuse the merge (log it as a rejected candidate) instead of only logging "MULTIPLE live tracks" as a warning.
+[x]2. **RTSP reconnect**: wrap `cv2.VideoCapture` read loop — on read failure, attempt reopen with exponential backoff (e.g. 1s, 2s, 5s, 10s cap) instead of sleeping forever. Log reconnect attempts.
+[x]3. **EXIT hold fix**: item 15 — one ambiguous pending track blocking all exits. Change the hold to be scoped per-person or per-zone rather than global (`if pending_tracks:` currently blocks everyone). At minimum, cap the hold duration so it can't block indefinitely.
+[x]4. **ReID merge cap**: when a merge candidate would attach to a person_id that already has another *live* track, refuse the merge (log it as a rejected candidate) instead of only logging "MULTIPLE live tracks" as a warning.
 
 ---
 

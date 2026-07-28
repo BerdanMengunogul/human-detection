@@ -465,16 +465,48 @@ class EventLog:
 class LatestFrameReader:
     """Reads frames from a VideoCapture on a background thread and
     always exposes only the most recently read frame, discarding any
-    older ones that the consumer didn't get to in time."""
+    older ones that the consumer didn't get to in time.
 
-    def __init__(self, cap):
+    On a read failure (dropped RTSP socket, camera reboot, network blip)
+    the underlying capture is released and reopened with exponential
+    backoff (1s, 2s, 5s, 10s, capped at 10s) instead of retrying forever
+    against a dead handle.
+    """
+
+    RECONNECT_DELAYS = (1, 2, 5, 10)
+
+    def __init__(self, cap, reopen_fn):
         self._cap = cap
+        self._reopen_fn = reopen_fn
         self._lock = threading.Lock()
         self._frame = None
         self._ok = False
         self._stopped = False
         self._thread = threading.Thread(target=self._update, daemon=True)
         self._thread.start()
+
+    def _reconnect(self):
+        try:
+            self._cap.release()
+        except Exception:
+            pass
+        attempt = 0
+        while not self._stopped:
+            delay = self.RECONNECT_DELAYS[min(attempt, len(self.RECONNECT_DELAYS) - 1)]
+            print(f"[RTSP] Reconnecting in {delay}s (attempt {attempt + 1})...")
+            time.sleep(delay)
+            if self._stopped:
+                return
+            try:
+                new_cap = self._reopen_fn()
+            except Exception as e:
+                print(f"[RTSP] Reconnect attempt {attempt + 1} failed: {e}")
+                new_cap = None
+            if new_cap is not None and new_cap.isOpened():
+                self._cap = new_cap
+                print("[RTSP] Reconnected successfully.")
+                return
+            attempt += 1
 
     def _update(self):
         while not self._stopped:
@@ -483,7 +515,7 @@ class LatestFrameReader:
                 self._ok = ok
                 self._frame = frame
             if not ok:
-                time.sleep(0.1)
+                self._reconnect()
 
     def read(self):
         with self._lock:
@@ -492,6 +524,10 @@ class LatestFrameReader:
     def stop(self):
         self._stopped = True
         self._thread.join(timeout=2)
+        try:
+            self._cap.release()
+        except Exception:
+            pass
 
 
 class PersonGallery:
@@ -618,14 +654,20 @@ class PersonGallery:
         self._next_id += 1
         return person_id
 
-    def identify_many(self, embeddings, face_embedding=None):
+    def identify_many(self, embeddings, face_embedding=None, reject_id=None):
         """Return the Person-N id for a track, given several body-appearance
         candidate embeddings (matches if any is a close enough match, rather
         than betting everything on one frame) and an optional face embedding.
 
         A confident face match wins outright over body appearance, since it
         survives clothing/headwear changes that defeat body-ReID. Otherwise
-        falls back to the body-appearance match, or mints a new Person-N."""
+        falls back to the body-appearance match, or mints a new Person-N.
+
+        `reject_id`, if given, is a callable(person_id) -> bool. When the
+        best-matching person_id is rejected (e.g. because it already has
+        another live track - a ReID false-positive merge), a new Person-N is
+        minted instead of attaching to it, and none of this track's samples
+        are added to the rejected person's bank."""
         normalized = []
         for embedding in embeddings:
             norm = np.linalg.norm(embedding)
@@ -642,7 +684,9 @@ class PersonGallery:
         if face_norm is not None:
             face_id, face_sim = self._best_match(face_norm, self._face_embeddings)
 
-        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD:
+        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD and (
+            reject_id is None or not reject_id(face_id)
+        ):
             person_id = face_id
             with self._lock:
                 self._face_embeddings[person_id].append(face_norm)
@@ -653,6 +697,9 @@ class PersonGallery:
                 self.save()
             print(f"[IDENTITY] Person-{person_id} reused via FACE match (sim={face_sim:.2f})")
             return person_id
+        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD:
+            print(f"[IDENTITY] Rejected FACE match to Person-{face_id} (sim={face_sim:.2f}): "
+                  f"already has another live track - minting new identity instead.")
 
         body_id, body_sim = (None, -1.0)
         for embedding in normalized:
@@ -660,7 +707,13 @@ class PersonGallery:
             if cand_sim > body_sim:
                 body_id, body_sim = cand_id, cand_sim
 
-        if body_id is not None and body_sim >= REID_MATCH_THRESHOLD:
+        body_rejected = False
+        if body_id is not None and body_sim >= REID_MATCH_THRESHOLD and reject_id is not None and reject_id(body_id):
+            body_rejected = True
+            print(f"[IDENTITY] Rejected BODY match to Person-{body_id} (sim={body_sim:.2f}): "
+                  f"already has another live track - minting new identity instead.")
+
+        if body_id is not None and body_sim >= REID_MATCH_THRESHOLD and not body_rejected:
             person_id = body_id
             print(f"[IDENTITY] Person-{person_id} reused via BODY match (sim={body_sim:.2f}, face_sim={face_sim:.2f})")
         elif not normalized and face_norm is None:
@@ -798,14 +851,15 @@ def best_face_embedding(analyzer, frame, xyxy):
     return best.normed_embedding
 
 
-def open_stream():
+def open_stream(exit_on_failure=True):
     cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         print(f"[ERROR] Could not connect to RTSP stream: {RTSP_URL}")
         print("Check that the IP, port, credentials, and channel are correct,")
         print("and that the camera is reachable on the network.")
-        sys.exit(1)
+        if exit_on_failure:
+            sys.exit(1)
     return cap
 
 
@@ -973,7 +1027,7 @@ def run_detection(state=None, show_window=True):
     zone_occupants_prev = {z["id"]: set() for z in web_zones}  # zone_id -> person_ids inside last frame
 
     cap = open_stream()
-    reader = LatestFrameReader(cap)
+    reader = LatestFrameReader(cap, reopen_fn=lambda: open_stream(exit_on_failure=False))
 
     window_name = "Human Detection - Press 'q' to quit"
     if show_window:
@@ -1147,17 +1201,18 @@ def run_detection(state=None, show_window=True):
                                 stage_timer.add("face", time.time() - _t0)
                     if not embeddings and face_embedding is None:
                         continue
-                    track_to_person[track_id] = gallery.identify_many(embeddings, face_embedding)
+                    def _has_other_live_track(candidate_person_id):
+                        return any(
+                            pid == candidate_person_id and tid != track_id
+                            for tid, pid in track_to_person.items()
+                        )
+
+                    track_to_person[track_id] = gallery.identify_many(
+                        embeddings, face_embedding, reject_id=_has_other_live_track
+                    )
                     track_last_topup_time[track_id] = time.time()
                     pending_track_first_seen.pop(track_id, None)
                     new_person_id = track_to_person[track_id]
-                    other_live_tracks = [
-                        tid for tid, pid in track_to_person.items()
-                        if pid == new_person_id and tid != track_id
-                    ]
-                    if other_live_tracks:
-                        print(f"[IDENTITY] Person-{new_person_id} now mapped to MULTIPLE live tracks: "
-                              f"{sorted(other_live_tracks + [track_id])} - possible ReID false-positive merge.")
                     now_in_zone = _foot_point_in_any_zone(x1, y1, x2, y2, web_zones)
                     ever_in_zone = pending_track_zone_hit.pop(track_id, False) or now_in_zone
                     if new_person_id not in present_person_ids and (not web_zones or ever_in_zone):
@@ -1250,7 +1305,12 @@ def run_detection(state=None, show_window=True):
                 pending_tracks.pop(missing_track_id, None)
                 pending_track_first_seen.pop(missing_track_id, None)
                 pending_track_zone_hit.pop(missing_track_id, None)
-                if pending_tracks:
+                now = time.time()
+                still_resolving = any(
+                    now - first_seen < IDENTIFY_DELAY_SECONDS + EXIT_GRACE_SECONDS
+                    for first_seen in pending_track_first_seen.values()
+                )
+                if still_resolving:
                     # One or more *other* tracks haven't finished their
                     # identify delay yet. If the tracker split this same
                     # person into a new track_id right as this one dropped,
@@ -1259,6 +1319,13 @@ def run_detection(state=None, show_window=True):
                     # tear down this track's bookkeeping first. Hold the EXIT
                     # decision until pending tracks resolve, instead of firing
                     # a spurious EXIT/ENTER pair for one continuous visit.
+                    #
+                    # Capped by IDENTIFY_DELAY_SECONDS + EXIT_GRACE_SECONDS: a
+                    # pending track can only ever need that long to resolve
+                    # into a Person-N (see the elapsed check above). Past
+                    # that, it's stuck (e.g. lost before reaching
+                    # IDENTIFY_MIN_CANDIDATES) and must not be allowed to
+                    # block every other person's EXIT indefinitely.
                     continue
                 track_missing_since.pop(missing_track_id, None)
                 person_id = track_to_person.pop(missing_track_id, None)
@@ -1344,7 +1411,6 @@ def run_detection(state=None, show_window=True):
         print("Interrupted by user.")
     finally:
         reader.stop()
-        cap.release()
         if show_window:
             cv2.destroyAllWindows()
         event_log.close()

@@ -47,28 +47,29 @@ Goal: ENTER/EXIT events only fire when a track's foot-point crosses into/out of 
 
 ---
 
-## Phase 3 — Dependencies & config
+## Phase 3 — Dependencies & config (DONE)
 
-1. Regenerate `requirements.txt` with actual pinned versions from the working environment: `pip freeze` filtered to what's imported (torch, numpy, insightface, onnxruntime/onnxruntime-gpu, ultralytics, opencv-python, fastapi, uvicorn, jinja2, python-multipart). Confirm GPU vs CPU torch/onnxruntime variant with user since that affects the install command.
-2. Introduce a single config source (env vars + optional `config.yaml`) for: RTSP URL, model paths (`yolov8n.pt` etc.), thresholds (`EXIT_GRACE_SECONDS`, `IDENTIFY_DELAY_SECONDS`, `IDENTIFY_MIN_CANDIDATES`, IoU/ReID thresholds), DB path, gallery path. Keep current constants as defaults so behavior doesn't change unless overridden.
-3. Document the CUDA/cuDNN stack the DLL-path hacks assume (versions, install order) in a short `SETUP.md`, or containerize with a Dockerfile pinning the same versions — pick one; containerizing is more work but removes the brittleness entirely. Ask user which they want.
+1.[x] `requirements.txt` regenerated with actual pinned versions (torch==2.13.0+cu126, torchvision, numpy, insightface, onnxruntime-gpu==1.21.1, ultralytics, opencv-python, fastapi, uvicorn, jinja2, python-multipart, python-dotenv, pyyaml), GPU (cu126) variant confirmed via `--extra-index-url`.
+2.[x] Single config source added: `config.py` reads env vars + optional `config.yaml` (see `config.yaml.example`), covering model paths, thresholds (`EXIT_GRACE_SECONDS`, `IDENTIFY_DELAY_SECONDS`, `IDENTIFY_MIN_CANDIDATES`, etc.), `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`, `GALLERY_PATH`; `CAMERA_RTSP_URL` and `DB_PASSWORD` stay env-only per Phase 0. Defaults preserve current behavior.
+3.[x] `SETUP.md` documents the CUDA/cuDNN stack (pinned versions, install order, DLL-path hack rationale) instead of containerizing.
+4.[x] **Switched `EventLog` from SQLite to PostgreSQL** (`human_detection.py`): `psycopg2` connection using `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD`, same `events` table schema via `CREATE TABLE IF NOT EXISTS`. `webapp.py` opens its own separate read-only connection (`_events_db_readonly`) rather than sharing the detector's connection — this also satisfies Phase 5 item 1 (SQLite locking) by construction, since Postgres handles concurrent writer/reader access natively. See `requirements.txt` (`psycopg2-binary`) and `.env.example` (`DB_PASSWORD`).
 
 ---
 
-## Phase 4 — Performance
+## Phase 4 — Performance-Done
 
 Each of these is independent; do in any order based on measured impact:
 
-1. **Pose model**: make the second YOLO pose pass optional (env/config flag) or run every K-th frame, since it only feeds the skeleton overlay, not tracking/ReID.
-2. **Pending-ReID frame copies**: replace `frame.copy()` per candidate with storing a small crop (bounding box region) or capping to a few best frames per track instead of full-frame copies.
-3. **Gallery save debounce**: `gallery.save()` currently writes to disk on every identify/top-up. Batch: save at most once every N seconds or on a background thread/timer, plus on clean shutdown.
-4. **Skip JPEG encode with no viewers**: track active MJPEG subscriber count in `webapp.py`; skip `cv2.imencode` in the capture loop when it's zero.
+[x]1. **Pose model**: make the second YOLO pose pass optional (env/config flag) or run every K-th frame, since it only feeds the skeleton overlay, not tracking/ReID.
+[x]2. **Pending-ReID frame copies**: replace `frame.copy()` per candidate with storing a small crop (bounding box region) or capping to a few best frames per track instead of full-frame copies.
+[x]3. **Gallery save debounce**: `gallery.save()` currently writes to disk on every identify/top-up. Batch: save at most once every N seconds or on a background thread/timer, plus on clean shutdown.
+[x]4. **Skip JPEG encode with no viewers**: track active MJPEG subscriber count in `webapp.py`; skip `cv2.imencode` in the capture loop when it's zero.
 
 ---
 
 ## Phase 5 — Reliability & concurrency
 
-1. **SQLite locking**: `EventLog` uses `check_same_thread=False` with concurrent writer (detector) + reader (dashboard). Add a `threading.Lock` around write methods, or switch reads to a fresh short-lived connection with `PRAGMA busy_timeout` set, or move writes through a `queue.Queue` drained by one writer thread.
+1. ~~**SQLite locking**~~ — moot: `EventLog` now runs on PostgreSQL (see Phase 3 item 4) with the detector and dashboard each holding their own connection, so there's no shared-file-handle contention to work around.
 2. **RTSP reconnect**: wrap `cv2.VideoCapture` read loop — on read failure, attempt reopen with exponential backoff (e.g. 1s, 2s, 5s, 10s cap) instead of sleeping forever. Log reconnect attempts.
 3. **EXIT hold fix**: item 15 — one ambiguous pending track blocking all exits. Change the hold to be scoped per-person or per-zone rather than global (`if pending_tracks:` currently blocks everyone). At minimum, cap the hold duration so it can't block indefinitely.
 4. **ReID merge cap**: when a merge candidate would attach to a person_id that already has another *live* track, refuse the merge (log it as a rejected candidate) instead of only logging "MULTIPLE live tracks" as a warning.

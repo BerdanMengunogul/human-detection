@@ -1,0 +1,58 @@
+# Copy this file to config.yaml to override any of the defaults below.
+# Every key is optional - omit anything you want left at its default.
+# Env vars (HD_<NAME>, e.g. HD_EXIT_GRACE_SECONDS=2.0) take precedence over
+# this file. RTSP camera credentials are NOT configured here - see .env.
+
+# --- Model paths ---
+# MODEL_NAME: yolov8s.pt
+# REID_MODEL_NAME: yolo26m-reid.onnx
+# TRACKER_CONFIG: tracker_reid.yaml
+# POSE_MODEL_NAME: yolov8s-pose.pt
+
+# --- Detection ---
+# PERSON_CLASS_ID: 0
+# CONF_THRESHOLD: 0.5
+# DISPLAY_MAX_WIDTH: 1280
+# DISPLAY_MAX_HEIGHT: 720
+
+# --- Pose ---
+# POSE_CONF_THRESHOLD: 0.5
+# POSE_KEYPOINT_CONF_THRESHOLD: 0.5
+# POSE_IOU_MATCH_THRESHOLD: 0.3
+
+# --- Box filtering / smoothing ---
+# MIN_BOX_AREA_FRACTION: 0.001
+# COUNT_SMOOTHING_WINDOW: 7
+# BOX_SMOOTHING_ALPHA: 0.4
+# BOX_COAST_FRAMES: 5
+
+# --- Re-ID ---
+# REID_MATCH_THRESHOLD: 0.4
+# REID_TOPUP_INTERVAL_SECONDS: 2.0
+# REID_MAX_SAMPLES_PER_PERSON: 5
+
+# --- Face ---
+# FACE_MATCH_THRESHOLD: 0.5
+# FACE_MAX_SAMPLES_PER_PERSON: 5
+# FACE_MIN_BOX_HEIGHT: 40
+
+# --- Identify / exit timing ---
+# IDENTIFY_DELAY_SECONDS: 0.35
+# IDENTIFY_MIN_CANDIDATES: 3
+# EXIT_GRACE_SECONDS: 1.0
+
+# --- Misc ---
+# PROFILE_REPORT_INTERVAL: 60
+
+# --- Paths (relative values resolve against this file's directory) ---
+# ZONES_PATH: door_zones.json
+# ZONES_VERSION_PATH: door_zones.version
+# PEOPLE_PATH: people.json
+# GALLERY_PATH: gallery.npz
+
+# --- Database (PostgreSQL) ---
+# DB_PASSWORD is NOT configured here - see .env.
+# DB_HOST: localhost
+# DB_PORT: 5433
+# DB_NAME: human_detection
+# DB_USER: postgres

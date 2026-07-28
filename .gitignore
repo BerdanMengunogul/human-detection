@@ -3,6 +3,8 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+gallery.npz
+people.json
 *.output
 *.log
 *.pt

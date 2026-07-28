@@ -6,7 +6,7 @@ EventLog/zone-gating) on a background thread, and serves:
   GET /            tabbed HTML dashboard (Live / Occupancy / History)
   GET /video_feed   MJPEG stream of the latest annotated frame
   GET /api/occupancy  current human count + who is currently present
-  GET /api/events     recent enter/exit history from tracking.db
+  GET /api/events     recent enter/exit history from the events database
 
 Meant to be started via `python human_detection.py --web`, which bootstraps
 uvicorn bound to a LAN-reachable interface (0.0.0.0 by default).
@@ -15,10 +15,12 @@ uvicorn bound to a LAN-reachable interface (0.0.0.0 by default).
 import json
 import os
 import secrets
-import sqlite3
 import threading
 import time
 from datetime import datetime
+
+import psycopg2
+import psycopg2.extras
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -94,10 +96,14 @@ def _stop_detection():
 
 
 def _events_db_readonly():
-    """Read-only connection to tracking.db so the dashboard never
-    contends with the detection loop's own writes (WAL-friendly)."""
-    conn = sqlite3.connect(f"file:{hd.DB_PATH}?mode=ro", uri=True, timeout=5)
-    conn.row_factory = sqlite3.Row
+    """Separate connection to the events database so the dashboard never
+    contends with the detection loop's own writer connection."""
+    conn = psycopg2.connect(
+        host=hd.DB_HOST, port=hd.DB_PORT, dbname=hd.DB_NAME,
+        user=hd.DB_USER, password=hd.DB_PASSWORD,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    conn.autocommit = True
     return conn
 
 
@@ -115,6 +121,7 @@ def _load_zones_file():
 def _save_zones_file(data):
     with open(hd.ZONES_PATH, "w") as f:
         json.dump(data, f, indent=2)
+    hd.bump_zones_version()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -126,11 +133,15 @@ def index(request: Request, _user: str = Depends(require_auth)):
 def video_feed(_user: str = Depends(require_auth)):
     def generate():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        while True:
-            jpeg = state.latest_jpeg()
-            if jpeg is not None:
-                yield boundary + jpeg + b"\r\n"
-            time.sleep(0.05)
+        state.add_viewer()
+        try:
+            while True:
+                jpeg = state.latest_jpeg()
+                if jpeg is not None:
+                    yield boundary + jpeg + b"\r\n"
+                time.sleep(0.05)
+        finally:
+            state.remove_viewer()
 
     return StreamingResponse(
         generate(), media_type="multipart/x-mixed-replace; boundary=frame"
@@ -142,16 +153,18 @@ def api_occupancy(_user: str = Depends(require_auth)):
     snap = state.snapshot()
     conn = _events_db_readonly()
     try:
-        rows = conn.execute(
-            """
-            SELECT person_id, event_type, timestamp
-            FROM events e
-            WHERE timestamp = (
-                SELECT MAX(timestamp) FROM events WHERE person_id = e.person_id
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT person_id, event_type, timestamp
+                FROM events e
+                WHERE timestamp = (
+                    SELECT MAX(timestamp) FROM events WHERE person_id = e.person_id
+                )
+                ORDER BY person_id
+                """
             )
-            ORDER BY person_id
-            """
-        ).fetchall()
+            rows = cur.fetchall()
     finally:
         conn.close()
 
@@ -211,11 +224,13 @@ def api_events(limit: int = 50, _user: str = Depends(require_auth)):
     limit = max(1, min(limit, 500))
     conn = _events_db_readonly()
     try:
-        rows = conn.execute(
-            "SELECT id, person_id, event_type, timestamp FROM events "
-            "ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, person_id, event_type, timestamp FROM events "
+                "ORDER BY id DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
     finally:
         conn.close()
 

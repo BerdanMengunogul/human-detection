@@ -8,4 +8,5 @@ __pycache__/
 *.pt
 *.onnx
 .env
+config.yaml
 .claude/scheduled_tasks.lock

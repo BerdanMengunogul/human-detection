@@ -21,7 +21,7 @@ recognized as the same Person-N instead of getting a new number.
 import argparse
 import json
 import os
-import sqlite3
+import psycopg2
 import sys
 import threading
 import time
@@ -53,9 +53,13 @@ from insightface.app import FaceAnalysis
 from ultralytics import YOLO
 from ultralytics.trackers.utils.reid import ReID
 
+import config as _config
+
 load_dotenv()
 
 DEVICE = 0 if torch.cuda.is_available() else "cpu"
+
+_cfg = _config.load()
 
 # Main stream (101) is full resolution (2560x1440). GPU inference is fast
 # enough (~8ms/frame) that it's no longer the bottleneck, so we use the
@@ -67,26 +71,31 @@ if not RTSP_URL:
         "your camera's RTSP URL, or export CAMERA_RTSP_URL in your shell."
     )
 # "s" model is more accurate than "n" and still runs well under GPU inference.
-MODEL_NAME = "yolov8s.pt"
+MODEL_NAME = _cfg.MODEL_NAME
 # Dedicated ReID checkpoint (not the detector backbone) for the session-long
 # gallery: detector features aren't discriminative enough for appearance
 # matching (same person scored as low as 0.64 cosine sim in testing), so a
 # purpose-built person-ReID model is used instead. Auto-downloaded by
 # Ultralytics on first use.
-REID_MODEL_NAME = "yolo26m-reid.onnx"
-TRACKER_CONFIG = "tracker_reid.yaml"
-PERSON_CLASS_ID = 0
-CONF_THRESHOLD = 0.5
+REID_MODEL_NAME = _cfg.REID_MODEL_NAME
+TRACKER_CONFIG = _cfg.TRACKER_CONFIG
+PERSON_CLASS_ID = _cfg.PERSON_CLASS_ID
+CONF_THRESHOLD = _cfg.CONF_THRESHOLD
 BOX_COLOR = (0, 255, 0)  # green, BGR
-DISPLAY_MAX_WIDTH = 1280
-DISPLAY_MAX_HEIGHT = 720
+DISPLAY_MAX_WIDTH = _cfg.DISPLAY_MAX_WIDTH
+DISPLAY_MAX_HEIGHT = _cfg.DISPLAY_MAX_HEIGHT
 
 # Separate pose-estimation model run alongside the detector/tracker, purely
 # for the skeleton overlay - does not feed into tracking, ReID, or identity.
-POSE_MODEL_NAME = "yolov8s-pose.pt"
-POSE_CONF_THRESHOLD = 0.5
-POSE_KEYPOINT_CONF_THRESHOLD = 0.5  # per-keypoint conf below this is skipped (occluded/off-frame joint)
+POSE_MODEL_NAME = _cfg.POSE_MODEL_NAME
+POSE_ENABLED = _cfg.POSE_ENABLED
+POSE_EVERY_N_FRAMES = max(1, _cfg.POSE_EVERY_N_FRAMES)
+POSE_CONF_THRESHOLD = _cfg.POSE_CONF_THRESHOLD
+POSE_KEYPOINT_CONF_THRESHOLD = _cfg.POSE_KEYPOINT_CONF_THRESHOLD  # per-keypoint conf below this is skipped (occluded/off-frame joint)
 POSE_COLOR = (0, 200, 255)  # orange, BGR - distinct from the green tracking box
+# IoU above which a pose-model detection is considered to belong to the same
+# person as a tracked detector box, for overlaying that person's skeleton.
+POSE_IOU_MATCH_THRESHOLD = _cfg.POSE_IOU_MATCH_THRESHOLD
 # COCO-17 keypoint indices: 0 nose, 1-2 eyes, 3-4 ears, 5-6 shoulders,
 # 7-8 elbows, 9-10 wrists, 11-12 hips, 13-14 knees, 15-16 ankles.
 POSE_SKELETON_EDGES = [
@@ -103,18 +112,18 @@ POSE_SKELETON_EDGES = [
 # filter rejects real people; CONF_THRESHOLD was lowered to 0.5 to reduce
 # flicker on borderline/occluded people, so this size floor now carries more
 # of the false-positive rejection burden.
-MIN_BOX_AREA_FRACTION = 0.001  # reject tiny specks relative to frame area
+MIN_BOX_AREA_FRACTION = _cfg.MIN_BOX_AREA_FRACTION  # reject tiny specks relative to frame area
 
 # Number of recent frames' counts to smooth over for the displayed number,
 # so a single flickery frame doesn't make the count spike up or down.
-COUNT_SMOOTHING_WINDOW = 7
+COUNT_SMOOTHING_WINDOW = _cfg.COUNT_SMOOTHING_WINDOW
 
 # EMA weight given to each new raw box when smoothing a track's drawn
 # bounding box. Lower = smoother but laggier; 1.0 disables smoothing.
 # YOLO's per-frame box coordinates wobble a few pixels even for a person
 # standing still, which reads as a vibrating border - blending toward the
 # new box instead of snapping to it removes that jitter.
-BOX_SMOOTHING_ALPHA = 0.4
+BOX_SMOOTHING_ALPHA = _cfg.BOX_SMOOTHING_ALPHA
 
 # A track missing from the tracker's output for up to this many *consecutive*
 # frames still has its last-known (smoothed) box drawn instead of vanishing,
@@ -123,12 +132,12 @@ BOX_SMOOTHING_ALPHA = 0.4
 # Deliberately short and frame-based (unlike EXIT_GRACE_SECONDS): this only
 # covers single-frame flicker, not the longer wall-clock window that decides
 # ENTER/EXIT events.
-BOX_COAST_FRAMES = 5
+BOX_COAST_FRAMES = _cfg.BOX_COAST_FRAMES
 
 # Cosine similarity above which a newly-seen track is considered the same
 # person as an earlier one in the session-long gallery (rather than someone
 # new). Lower catches more re-entries but risks merging two different people.
-REID_MATCH_THRESHOLD = 0.4
+REID_MATCH_THRESHOLD = _cfg.REID_MATCH_THRESHOLD
 
 # ArcFace embeddings (from InsightFace's buffalo_s recognition model) have a
 # much sharper same-person/different-person cosine-similarity separation than
@@ -137,12 +146,12 @@ REID_MATCH_THRESHOLD = 0.4
 # body appearance, since it survives clothing/headwear changes that defeat
 # the body-ReID gallery. Falls back to body appearance when no face is
 # detected (person facing away, too far, out of frame at head height, etc).
-FACE_MATCH_THRESHOLD = 0.5
-FACE_MAX_SAMPLES_PER_PERSON = 5
+FACE_MATCH_THRESHOLD = _cfg.FACE_MATCH_THRESHOLD
+FACE_MAX_SAMPLES_PER_PERSON = _cfg.FACE_MAX_SAMPLES_PER_PERSON
 # Faces need to be reasonably large in the frame to produce a reliable
 # embedding; SCRFD will happily detect tiny/blurry faces that then embed
 # unreliably. Rejects detections below this box height in pixels.
-FACE_MIN_BOX_HEIGHT = 40
+FACE_MIN_BOX_HEIGHT = _cfg.FACE_MIN_BOX_HEIGHT
 
 # Seconds between top-up embeddings for a track that's already been
 # identified. All of a track's initial candidates come from a narrow window
@@ -157,7 +166,7 @@ FACE_MIN_BOX_HEIGHT = 40
 # Expressed in wall-clock seconds (not frame count) so the behavior doesn't
 # silently change if the pipeline's FPS changes - see EXIT_GRACE_SECONDS
 # below for why frame counts are the wrong unit here.
-REID_TOPUP_INTERVAL_SECONDS = 2.0
+REID_TOPUP_INTERVAL_SECONDS = _cfg.REID_TOPUP_INTERVAL_SECONDS
 
 # Seconds to wait after a track first appears before computing its ReID
 # embedding. A track's very first frame is often a bad crop (motion blur,
@@ -167,23 +176,27 @@ REID_TOPUP_INTERVAL_SECONDS = 2.0
 # committing to an embedding from a bad frame.
 #
 # Expressed in wall-clock seconds - see EXIT_GRACE_SECONDS below.
-IDENTIFY_DELAY_SECONDS = 0.35
+IDENTIFY_DELAY_SECONDS = _cfg.IDENTIFY_DELAY_SECONDS
 # A track needs at least this many candidate frames (regardless of how much
 # time that took) before it's identified, so a stalled/near-zero-FPS run
 # still waits for a few real samples instead of identifying off just one.
-IDENTIFY_MIN_CANDIDATES = 3
+IDENTIFY_MIN_CANDIDATES = _cfg.IDENTIFY_MIN_CANDIDATES
 
-# Path to the SQLite database that records ENTER/EXIT events for the
-# admin dashboard. Lives next to the script so any dashboard process can
-# open the same file.
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracking.db")
+# PostgreSQL connection settings for the database that records ENTER/EXIT
+# events for the admin dashboard. DB_PASSWORD comes from .env, never from
+# config.yaml.
+DB_HOST = _cfg.DB_HOST
+DB_PORT = _cfg.DB_PORT
+DB_NAME = _cfg.DB_NAME
+DB_USER = _cfg.DB_USER
+DB_PASSWORD = _cfg.DB_PASSWORD
 
 # Set to True to print rolling average per-stage timings (track/reid/face/
 # encode) every PROFILE_REPORT_INTERVAL frames. Diagnostic only - leave off
 # for normal runs since the extra dict bookkeeping and prints have a small
 # cost of their own.
 PROFILE = os.environ.get("HD_PROFILE", "0") == "1"
-PROFILE_REPORT_INTERVAL = 60
+PROFILE_REPORT_INTERVAL = _cfg.PROFILE_REPORT_INTERVAL
 
 
 class StageTimer:
@@ -228,7 +241,7 @@ class StageTimer:
 # Keeping this one in seconds means it stays correct regardless of FPS;
 # tracker_reid.yaml's track_buffer is still frame-based (an ultralytics
 # constant we don't control) and is set generously to match at target FPS.
-EXIT_GRACE_SECONDS = 1.0
+EXIT_GRACE_SECONDS = _cfg.EXIT_GRACE_SECONDS
 
 # Path to the JSON file storing the room's door zones, as polygons drawn from
 # the web dashboard (in original, un-scaled frame coordinate space). A
@@ -242,9 +255,11 @@ EXIT_GRACE_SECONDS = 1.0
 # tracking noise that time-based grace frames alone can't distinguish from a
 # real departure. If no zones are configured, gating is skipped entirely and
 # ENTER/EXIT fall back to plain appear/disappear behavior.
-ZONES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "door_zones.json")
-PEOPLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "people.json")
-GALLERY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gallery.npz")
+ZONES_PATH = _cfg.ZONES_PATH
+ZONES_VERSION_PATH = _cfg.ZONES_VERSION_PATH
+PEOPLE_PATH = _cfg.PEOPLE_PATH
+GALLERY_PATH = _cfg.GALLERY_PATH
+GALLERY_SAVE_INTERVAL_SECONDS = _cfg.GALLERY_SAVE_INTERVAL_SECONDS
 
 
 class PeopleStore:
@@ -298,6 +313,25 @@ class PeopleStore:
 PEOPLE_STORE = PeopleStore()
 
 
+def read_zones_version():
+    """Cheap counter written by the webapp whenever door_zones.json changes."""
+    if not os.path.isfile(ZONES_VERSION_PATH):
+        return 0
+    try:
+        with open(ZONES_VERSION_PATH, "r") as f:
+            return int(f.read().strip())
+    except (ValueError, OSError):
+        return 0
+
+
+def bump_zones_version():
+    """Increment the zones version counter (called from webapp zone-save endpoints)."""
+    version = read_zones_version() + 1
+    with open(ZONES_VERSION_PATH, "w") as f:
+        f.write(str(version))
+    return version
+
+
 def load_web_zones(zones_path=ZONES_PATH):
     """Load dashboard-drawn polygon zones as a list of
     {id, name, task, points: [(x, y), ...]} dicts, in original-frame pixel
@@ -315,6 +349,36 @@ def load_web_zones(zones_path=ZONES_PATH):
             "points": [(p[0], p[1]) for p in zone.get("points", [])],
         })
     return zones
+
+
+def merge_zone_occupants(prev, web_zones):
+    """Keep occupancy sets for zones that still exist after a hot-reload."""
+    new_ids = {z["id"] for z in web_zones}
+    merged = {zone_id: prev[zone_id] for zone_id in new_ids if zone_id in prev}
+    for zone in web_zones:
+        merged.setdefault(zone["id"], set())
+    return merged
+
+
+class WebZonesStore:
+    """Loads web zones once and reloads only when the version counter changes."""
+
+    def __init__(self, zones_path=ZONES_PATH):
+        self._zones_path = zones_path
+        self._version = read_zones_version()
+        self._zones = load_web_zones(zones_path)
+
+    @property
+    def zones(self):
+        return self._zones
+
+    def maybe_reload(self):
+        current = read_zones_version()
+        if current == self._version:
+            return False
+        self._version = current
+        self._zones = load_web_zones(self._zones_path)
+        return True
 
 
 def point_in_polygon(x, y, points):
@@ -360,37 +424,39 @@ def _smoothed_box(track_id, raw_box, track_smoothed_box):
 
 
 class EventLog:
-    """Records ENTER/EXIT events for each Person-N to a SQLite database,
+    """Records ENTER/EXIT events for each Person-N to a PostgreSQL database,
     so an admin dashboard can later show who was present and when without
     needing to run or parse this detection script itself."""
 
-    def __init__(self, db_path):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                person_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL CHECK (event_type IN ('enter', 'exit')),
-                timestamp TEXT NOT NULL
-            )
-            """
+    def __init__(self, host, port, dbname, user, password):
+        self._conn = psycopg2.connect(
+            host=host, port=port, dbname=dbname, user=user, password=password,
         )
-        self._conn.commit()
+        self._conn.autocommit = True
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    person_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL CHECK (event_type IN ('enter', 'exit')),
+                    timestamp TEXT NOT NULL
+                )
+                """
+            )
 
     def record(self, person_id, event_type, track_id=None):
         timestamp = datetime.now().isoformat(timespec="seconds")
-        self._conn.execute(
-            "INSERT INTO events (person_id, event_type, timestamp) VALUES (?, ?, ?)",
-            (person_id, event_type, timestamp),
-        )
-        self._conn.commit()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO events (person_id, event_type, timestamp) VALUES (%s, %s, %s)",
+                (person_id, event_type, timestamp),
+            )
         print(f"[EVENT] Person-{person_id} {event_type.upper()} at {timestamp} (track={track_id})")
 
     def reset(self):
-        self._conn.execute("DELETE FROM events")
-        self._conn.commit()
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM events")
 
     def close(self):
         self._conn.close()
@@ -457,7 +523,7 @@ class PersonGallery:
     back to session-local numbering.
     """
 
-    MAX_SAMPLES_PER_PERSON = 5
+    MAX_SAMPLES_PER_PERSON = _cfg.REID_MAX_SAMPLES_PER_PERSON
 
     def __init__(self, path=GALLERY_PATH):
         self._path = path
@@ -465,6 +531,8 @@ class PersonGallery:
         self._face_embeddings = {}  # person_id -> deque of face embeddings (L2-normalized)
         self._next_id = 1
         self._lock = threading.Lock()
+        self._dirty = False
+        self._last_save_time = 0.0
         self.load()
 
     def reset(self):
@@ -472,6 +540,7 @@ class PersonGallery:
             self._embeddings.clear()
             self._face_embeddings.clear()
             self._next_id = 1
+            self._dirty = False
             if os.path.isfile(self._path):
                 os.remove(self._path)
 
@@ -502,7 +571,7 @@ class PersonGallery:
             f"{len(self._embeddings)} body identities from {self._path}"
         )
 
-    def save(self):
+    def _write(self):
         """Persist both embedding banks to a single .npz, one array per
         person per bank (key format 'body_<id>' / 'face_<id>')."""
         arrays = {}
@@ -516,6 +585,24 @@ class PersonGallery:
         with open(tmp_path, "wb") as f:
             np.savez(f, **arrays)
         os.replace(tmp_path, self._path)
+        self._dirty = False
+        self._last_save_time = time.time()
+
+    def save(self):
+        """Mark the gallery dirty and write to disk immediately if at least
+        GALLERY_SAVE_INTERVAL_SECONDS have passed since the last write.
+        Debounces the previous every-call save, which under steady
+        identify/top-up traffic was doing a full disk write per event."""
+        self._dirty = True
+        if time.time() - self._last_save_time >= GALLERY_SAVE_INTERVAL_SECONDS:
+            self._write()
+
+    def flush(self):
+        """Force a write if there are unsaved changes - called on shutdown
+        so the debounce in `save()` never loses the tail of a session."""
+        with self._lock:
+            if self._dirty:
+                self._write()
 
     def _best_match(self, embedding, bank_dict):
         best_id, best_sim = None, -1.0
@@ -629,6 +716,8 @@ def load_model():
 
 
 def load_pose_model():
+    if not POSE_ENABLED:
+        return None
     try:
         model = YOLO(POSE_MODEL_NAME)
         model.to(DEVICE)
@@ -739,15 +828,33 @@ class DetectionState:
         self._scale = 1.0
         self._zone_status = {}
         self._live_boxes = {}
+        self._viewer_count = 0
+
+    def add_viewer(self):
+        with self._lock:
+            self._viewer_count += 1
+
+    def remove_viewer(self):
+        with self._lock:
+            self._viewer_count = max(0, self._viewer_count - 1)
+
+    def has_viewers(self):
+        with self._lock:
+            return self._viewer_count > 0
 
     def update(self, frame, count, fps, present_person_ids=None,
                orig_w=None, orig_h=None, scale=None, zone_status=None,
                live_boxes=None):
-        ok, buf = cv2.imencode(".jpg", frame)
-        if not ok:
-            return
+        # Skip the JPEG encode (a meaningful chunk of per-frame cost) when
+        # nobody is watching /video_feed or requesting a zone snapshot.
+        if self.has_viewers():
+            ok, buf = cv2.imencode(".jpg", frame)
+            jpeg = buf.tobytes() if ok else None
+        else:
+            jpeg = None
         with self._lock:
-            self._jpeg = buf.tobytes()
+            if jpeg is not None:
+                self._jpeg = jpeg
             self._count = count
             self._fps = fps
             if present_person_ids is not None:
@@ -836,9 +943,9 @@ def run_detection(state=None, show_window=True):
     reid_encoder = load_reid_encoder()
     face_analyzer = load_face_analyzer()
     gallery = PersonGallery()
-    event_log = EventLog(DB_PATH)
+    event_log = EventLog(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     track_to_person = {}  # BoT-SORT track_id -> Person-N id (persists until track drops)
-    pending_tracks = {}  # track_id -> list of (score, frame, xywh) candidates
+    pending_tracks = {}  # track_id -> list of (score, bbox crop, local xywh) candidates
     pending_track_first_seen = {}  # track_id -> time.time() when first added to pending_tracks
     pending_track_zone_hit = {}  # track_id -> was its foot-point ever inside a web_zone while pending
     track_last_topup_time = {}  # track_id -> time.time() of last gallery top-up
@@ -851,7 +958,13 @@ def run_detection(state=None, show_window=True):
     people_store = PEOPLE_STORE
     stage_timer = StageTimer() if PROFILE else None
 
-    web_zones = load_web_zones()
+    pose_frame_counter = 0
+    cached_pose_boxes = []
+    cached_pose_keypoints_xy = []
+    cached_pose_keypoints_conf = []
+
+    web_zones_store = WebZonesStore()
+    web_zones = web_zones_store.zones
     if web_zones:
         print(f"[ZONES] Loaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
     else:
@@ -892,6 +1005,10 @@ def run_detection(state=None, show_window=True):
                 people_store.clear()
                 for zone_id in zone_occupants_prev:
                     zone_occupants_prev[zone_id] = set()
+            if web_zones_store.maybe_reload():
+                web_zones = web_zones_store.zones
+                zone_occupants_prev = merge_zone_occupants(zone_occupants_prev, web_zones)
+                print(f"[ZONES] Reloaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
             ret, frame = reader.read()
             if not ret or frame is None:
                 print("[WARNING] Waiting for frame from stream...")
@@ -908,18 +1025,23 @@ def run_detection(state=None, show_window=True):
 
             if stage_timer is not None:
                 _t0 = time.time()
-            pose_results = pose_model(frame, conf=POSE_CONF_THRESHOLD, device=DEVICE, verbose=False)[0]
-            pose_boxes = (
-                pose_results.boxes.xyxy.tolist() if pose_results.boxes is not None else []
-            )
-            pose_keypoints_xy = (
-                pose_results.keypoints.xy.tolist() if pose_results.keypoints is not None else []
-            )
-            pose_keypoints_conf = (
-                pose_results.keypoints.conf.tolist()
-                if pose_results.keypoints is not None and pose_results.keypoints.conf is not None
-                else []
-            )
+            if pose_model is not None and pose_frame_counter % POSE_EVERY_N_FRAMES == 0:
+                pose_results = pose_model(frame, conf=POSE_CONF_THRESHOLD, device=DEVICE, verbose=False)[0]
+                cached_pose_boxes = (
+                    pose_results.boxes.xyxy.tolist() if pose_results.boxes is not None else []
+                )
+                cached_pose_keypoints_xy = (
+                    pose_results.keypoints.xy.tolist() if pose_results.keypoints is not None else []
+                )
+                cached_pose_keypoints_conf = (
+                    pose_results.keypoints.conf.tolist()
+                    if pose_results.keypoints is not None and pose_results.keypoints.conf is not None
+                    else []
+                )
+            pose_frame_counter += 1
+            pose_boxes = cached_pose_boxes
+            pose_keypoints_xy = cached_pose_keypoints_xy
+            pose_keypoints_conf = cached_pose_keypoints_conf
             if stage_timer is not None:
                 stage_timer.add("pose", time.time() - _t0)
 
@@ -978,9 +1100,13 @@ def run_detection(state=None, show_window=True):
                     quality = (0 if touches_edge else 2) + (1 if aspect_ok else 0)
                     box_area = box_w * box_h
                     score = (quality, box_area)
-                    xywh = np.array([[(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]])
+                    cx1, cy1 = max(int(x1), 0), max(int(y1), 0)
+                    cx2, cy2 = min(int(x2), frame_w), min(int(y2), frame_h)
+                    crop = frame[cy1:cy2, cx1:cx2].copy()
+                    crop_h, crop_w = crop.shape[:2]
+                    xywh = np.array([[crop_w / 2, crop_h / 2, crop_w, crop_h]])
                     candidates = pending_tracks.setdefault(track_id, [])
-                    candidates.append((score, frame.copy(), xywh))
+                    candidates.append((score, crop, xywh))
                     first_seen = pending_track_first_seen.setdefault(track_id, time.time())
                     in_zone_now = _foot_point_in_any_zone(x1, y1, x2, y2, web_zones)
                     if in_zone_now:
@@ -1003,10 +1129,10 @@ def run_detection(state=None, show_window=True):
                     del pending_tracks[track_id]
                     embeddings = []
                     face_embedding = None
-                    for score, cand_frame, cand_xywh in top_candidates:
+                    for score, cand_crop, cand_xywh in top_candidates:
                         if stage_timer is not None:
                             _t0 = time.time()
-                        emb = reid_encoder(cand_frame, cand_xywh)[0]
+                        emb = reid_encoder(cand_crop, cand_xywh)[0]
                         if stage_timer is not None:
                             stage_timer.add("reid", time.time() - _t0)
                         if emb is not None:
@@ -1016,7 +1142,7 @@ def run_detection(state=None, show_window=True):
                             cand_xyxy = (cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2)
                             if stage_timer is not None:
                                 _t0 = time.time()
-                            face_embedding = best_face_embedding(face_analyzer, cand_frame, cand_xyxy)
+                            face_embedding = best_face_embedding(face_analyzer, cand_crop, cand_xyxy)
                             if stage_timer is not None:
                                 stage_timer.add("face", time.time() - _t0)
                     if not embeddings and face_embedding is None:
@@ -1080,7 +1206,7 @@ def run_detection(state=None, show_window=True):
                     iou = _box_iou((x1, y1, x2, y2), pbox)
                     if iou > best_iou:
                         best_iou, best_pose_idx = iou, pi
-                if best_pose_idx >= 0 and best_iou > 0.3:
+                if best_pose_idx >= 0 and best_iou > POSE_IOU_MATCH_THRESHOLD:
                     draw_skeleton(
                         frame,
                         pose_keypoints_xy[best_pose_idx],
@@ -1222,6 +1348,7 @@ def run_detection(state=None, show_window=True):
         if show_window:
             cv2.destroyAllWindows()
         event_log.close()
+        gallery.flush()
         if state is not None:
             state.mark_running(False)
 

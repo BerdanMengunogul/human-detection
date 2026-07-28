@@ -5,6 +5,7 @@ __pycache__/
 *.db-wal
 gallery.npz
 people.json
+door_zones.version
 *.output
 *.log
 *.pt

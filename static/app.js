@@ -25,6 +25,10 @@ tabBtns.forEach((btn, i) => {
   });
 });
 
+document.getElementById("occ-goto-people-btn").addEventListener("click", () => {
+  activateTab(document.querySelector('.tab-btn[data-tab="people"]'));
+});
+
 function setStatValue(id, value) {
   const el = document.getElementById(id);
   if (el.textContent !== String(value)) {
@@ -56,7 +60,8 @@ function renderOccupancy(data) {
   setStatValue("occ-count", data.count);
   setStatValue("occ-fps", data.fps);
   setStatValue("occ-status", data.detector_running ? "Running" : "Stopped");
-  setStatValue("occ-unique", data.unique_count);
+  setStatValue("occ-in-room", data.in_room_count);
+  setStatValue("occ-unique", data.total_unique_count);
   setStartStopUI(data.detector_running);
 
   const tbody = document.querySelector("#occ-table tbody");
@@ -697,6 +702,9 @@ async function refreshPeopleTable() {
       delBtn.textContent = "Delete";
       delBtn.className = "reset-btn";
       delBtn.addEventListener("click", async () => {
+        if (!confirm(`Remove the name "${p.name}" from Person-${p.person_id}?`)) {
+          return;
+        }
         delBtn.disabled = true;
         try {
           await fetch(`/api/people/${p.person_id}`, { method: "DELETE" });

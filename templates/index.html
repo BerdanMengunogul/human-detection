@@ -58,16 +58,24 @@
           </div>
         </div>
         <div class="stat-card">
+          <span class="stat-icon">&#128100;</span>
+          <div class="stat-text">
+            <span class="stat-label">In room now</span>
+            <span class="stat-value" id="occ-in-room">-</span>
+          </div>
+        </div>
+        <div class="stat-card">
           <span class="stat-icon">&#128101;</span>
           <div class="stat-text">
-            <span class="stat-label">Unique persons</span>
+            <span class="stat-label">Total unique seen</span>
             <span class="stat-value" id="occ-unique">-</span>
           </div>
         </div>
       </div>
 
       <div class="section-head">
-        <h2>Saved persons</h2>
+        <h2>People</h2>
+        <button id="occ-goto-people-btn" class="link-btn" type="button">Manage names &rarr;</button>
         <button id="reset-btn" class="reset-btn">Reset saved persons</button>
       </div>
       <div class="table-wrap">
@@ -156,6 +164,7 @@
 
       <div class="section-head">
         <h2>Named people</h2>
+        <span class="stat-label">Live status for these people is shown on the Occupancy tab</span>
       </div>
       <div class="table-wrap">
         <table id="people-table">

@@ -383,6 +383,19 @@ tbody tr:hover { background: var(--panel-hover); }
 .reset-btn:active { transform: scale(0.97); }
 .reset-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+  margin-right: auto;
+  flex: none;
+}
+
+.link-btn:hover { text-decoration: underline; }
+
 .toast {
   position: fixed;
   left: 50%;

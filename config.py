@@ -73,6 +73,10 @@ _SCHEMA = [
     ("DB_PORT", int, 5433),
     ("DB_NAME", str, "human_detection"),
     ("DB_USER", str, "postgres"),
+
+    # ntfy.sh push notifications for zone alerts (empty topic disables).
+    ("NTFY_SERVER", str, "https://ntfy.sh"),
+    ("NTFY_TOPIC", str, ""),
 ]
 
 _PATH_KEYS = {"ZONES_PATH", "ZONES_VERSION_PATH", "PEOPLE_PATH", "GALLERY_PATH"}

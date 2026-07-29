@@ -31,6 +31,7 @@ from fastapi.templating import Jinja2Templates
 
 import pipeline
 from identity import PEOPLE_STORE
+from notify import notify_zone_alert
 from zones import ZONES_PATH, bump_zones_version
 
 app = FastAPI(title="Human Detection Dashboard")
@@ -228,12 +229,15 @@ def _build_occupancy_payload():
     for person_id in live_present - known_ids:
         people.append({"person_id": person_id, "name": names.get(person_id), "status": "IN", "since": None})
     people.sort(key=lambda p: p["person_id"])
-    unique_count = len(known_ids | live_present)
     return {
         "count": snap["count"],
         "fps": round(snap["fps"], 1),
         "detector_running": snap["running"],
-        "unique_count": unique_count,
+        # Currently present (live tracker state) vs. all-time distinct
+        # persons ever logged (DB history) - these are different numbers
+        # and were previously conflated into a single "unique_count".
+        "in_room_count": len(live_present),
+        "total_unique_count": len(known_ids | live_present),
         "people": people,
     }
 
@@ -431,6 +435,9 @@ def api_delete_zone(zone_id: str, _user: str = Depends(require_auth)):
     return JSONResponse({"ok": True})
 
 
+_last_zone_alert = {}
+
+
 def _build_zone_status_payload():
     data = _load_zones_file()
     zone_status = state.zone_status()
@@ -445,6 +452,11 @@ def _build_zone_status_payload():
             alert = len(occupants) > 0
         elif task == "alert_entry":
             alert = entered
+
+        if alert and not _last_zone_alert.get(zone["id"], False):
+            notify_zone_alert(zone["name"], task)
+        _last_zone_alert[zone["id"]] = alert
+
         result.append(
             {
                 "id": zone["id"],

@@ -50,30 +50,40 @@ function showToast(message) {
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2500);
 }
 
+function renderOccupancy(data) {
+  setConnected(true);
+
+  setStatValue("occ-count", data.count);
+  setStatValue("occ-fps", data.fps);
+  setStatValue("occ-status", data.detector_running ? "Running" : "Stopped");
+  setStatValue("occ-unique", data.unique_count);
+  setStartStopUI(data.detector_running);
+
+  const tbody = document.querySelector("#occ-table tbody");
+  tbody.innerHTML = "";
+  data.people.forEach((p, i) => {
+    const tr = document.createElement("tr");
+    tr.style.animationDelay = `${i * 30}ms`;
+    const statusClass = p.status === "IN" ? "status-in" : "status-out";
+    const label = p.name || `Person-${p.person_id}`;
+    const tdName = document.createElement("td");
+    tdName.textContent = label;
+    const tdStatus = document.createElement("td");
+    tdStatus.className = statusClass;
+    tdStatus.textContent = p.status;
+    const tdSince = document.createElement("td");
+    tdSince.textContent = p.since;
+    tr.append(tdName, tdStatus, tdSince);
+    tbody.appendChild(tr);
+  });
+  document.getElementById("occ-table").hidden = data.people.length === 0;
+  document.getElementById("occ-empty").hidden = data.people.length !== 0;
+}
+
 async function refreshOccupancy() {
   try {
     const res = await fetch("/api/occupancy");
-    const data = await res.json();
-    setConnected(true);
-
-    setStatValue("occ-count", data.count);
-    setStatValue("occ-fps", data.fps);
-    setStatValue("occ-status", data.detector_running ? "Running" : "Stopped");
-    setStatValue("occ-unique", data.unique_count);
-    setStartStopUI(data.detector_running);
-
-    const tbody = document.querySelector("#occ-table tbody");
-    tbody.innerHTML = "";
-    data.people.forEach((p, i) => {
-      const tr = document.createElement("tr");
-      tr.style.animationDelay = `${i * 30}ms`;
-      const statusClass = p.status === "IN" ? "status-in" : "status-out";
-      const label = p.name || `Person-${p.person_id}`;
-      tr.innerHTML = `<td>${label}</td><td class="${statusClass}">${p.status}</td><td>${p.since}</td>`;
-      tbody.appendChild(tr);
-    });
-    document.getElementById("occ-table").hidden = data.people.length === 0;
-    document.getElementById("occ-empty").hidden = data.people.length !== 0;
+    renderOccupancy(await res.json());
   } catch (err) {
     console.error("occupancy poll failed", err);
     setConnected(false);
@@ -107,7 +117,13 @@ async function refreshHistory() {
       tr.dataset.eventId = e.id;
       tr.style.animationDelay = `${newCount * 20}ms`;
       const label = e.name || `Person-${e.person_id}`;
-      tr.innerHTML = `<td>${e.timestamp}</td><td>${label}</td><td>${e.event_type.toUpperCase()}</td>`;
+      const tdTime = document.createElement("td");
+      tdTime.textContent = e.timestamp;
+      const tdName = document.createElement("td");
+      tdName.textContent = label;
+      const tdType = document.createElement("td");
+      tdType.textContent = e.event_type.toUpperCase();
+      tr.append(tdTime, tdName, tdType);
       tbody.insertBefore(tr, tbody.firstChild);
     });
 
@@ -156,13 +172,24 @@ document.getElementById("reset-btn").addEventListener("click", async (e) => {
   }
 });
 
+// --- Live occupancy/zone-status feed (SSE) ------------------------------
+// A single long-lived EventSource replaces 1s polling of /api/occupancy and
+// /api/zone-status: the server pushes a named event only when that payload
+// actually changes (see /api/stream in webapp.py). Opened once globally
+// since it's push-based and cheap to leave connected; EventSource also
+// auto-reconnects on drop.
+
+const occupancyStream = new EventSource("/api/stream");
+occupancyStream.addEventListener("occupancy", (e) => renderOccupancy(JSON.parse(e.data)));
+occupancyStream.addEventListener("zone-status", (e) => renderZoneStatus(JSON.parse(e.data)));
+occupancyStream.onerror = () => setConnected(false);
+occupancyStream.onopen = () => setConnected(true);
+
 // --- Per-tab lazy polling ----------------------------------------------
-// Each tab only fetches its data when it becomes active, then polls on an
-// interval only while it stays active. Switching away stops that tab's poll.
+// History still polls on an interval only while its tab is active; live
+// occupancy/zone-status come from the SSE stream above instead.
 
 const tabPollers = {
-  live: { refresh: refreshOccupancy, timer: null },
-  occupancy: { refresh: refreshOccupancy, timer: null },
   history: { refresh: refreshHistory, timer: null },
 };
 
@@ -184,6 +211,7 @@ function onTabActivated(tabName) {
 }
 
 onTabActivated("live");
+refreshOccupancy();
 
 // --- Start/Stop detector ----------------------------------------------
 
@@ -464,40 +492,29 @@ async function refreshZones() {
   }
 }
 
-let zoneStatusTimer = null;
+function renderZoneStatus(data) {
+  data.zones.forEach((zs) => {
+    const row = document.querySelector(`#zone-table tr[data-zone-id="${zs.id}"]`);
+    if (!row) return;
+    const alertCell = row.querySelector(".zone-alert-cell");
+    if (!alertCell) return;
+    if (zs.task === "none") {
+      alertCell.textContent = "-";
+      alertCell.classList.remove("zone-alert-active");
+    } else {
+      alertCell.textContent = zs.alert ? "ALERT" : "clear";
+      alertCell.classList.toggle("zone-alert-active", zs.alert);
+    }
+    row.classList.toggle("zone-row-alert", zs.alert);
+  });
+}
 
 async function refreshZoneStatus() {
   try {
     const res = await fetch("/api/zone-status");
-    const data = await res.json();
-    data.zones.forEach((zs) => {
-      const row = document.querySelector(`#zone-table tr[data-zone-id="${zs.id}"]`);
-      if (!row) return;
-      const alertCell = row.querySelector(".zone-alert-cell");
-      if (!alertCell) return;
-      if (zs.task === "none") {
-        alertCell.textContent = "-";
-        alertCell.classList.remove("zone-alert-active");
-      } else {
-        alertCell.textContent = zs.alert ? "ALERT" : "clear";
-        alertCell.classList.toggle("zone-alert-active", zs.alert);
-      }
-      row.classList.toggle("zone-row-alert", zs.alert);
-    });
+    renderZoneStatus(await res.json());
   } catch (err) {
     console.error("zone-status poll failed", err);
-  }
-}
-
-function startZoneStatusPolling() {
-  stopZoneStatusPolling();
-  zoneStatusTimer = setInterval(refreshZoneStatus, POLL_INTERVAL_MS);
-}
-
-function stopZoneStatusPolling() {
-  if (zoneStatusTimer) {
-    clearInterval(zoneStatusTimer);
-    zoneStatusTimer = null;
   }
 }
 
@@ -524,13 +541,7 @@ window.addEventListener("resize", () => {
 document.querySelector('.tab-btn[data-tab="zones"]').addEventListener("click", () => {
   loadZoneSnapshot();
   refreshZones();
-  startZoneStatusPolling();
-});
-
-tabBtns.forEach((btn) => {
-  if (btn.dataset.tab !== "zones") {
-    btn.addEventListener("click", stopZoneStatusPolling);
-  }
+  refreshZoneStatus();
 });
 
 // --- People tab --------------------------------------------------------

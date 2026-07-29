@@ -1,5 +1,29 @@
 # Setup: GPU stack (CUDA / cuDNN) & PostgreSQL
 
+## Dashboard auth (LAN-only — read before exposing beyond LAN)
+
+`webapp.py` gates every route behind HTTP Basic (`DASHBOARD_USER` /
+`DASHBOARD_PASSWORD`), enforced once the dashboard is bound to anything other
+than localhost (see `require_auth` in [webapp.py](webapp.py)).
+
+**This is only appropriate for trusted LAN use.** HTTP Basic sends
+credentials on every request, base64-encoded (not encrypted); without TLS in
+front of it, anyone on the same network segment — or on the path if the
+dashboard is ever reachable over the open internet — can read the
+credentials off the wire. There's also no session expiry, logout, or
+rate-limiting on login attempts.
+
+Do **not** port-forward this dashboard to the internet, or put it behind a
+tunnel reachable from outside your LAN, as-is. If the dashboard ever needs to
+be reachable beyond the LAN:
+1. Put it behind TLS (reverse proxy with a real cert, or a tunnel that
+   terminates TLS) so Basic auth credentials aren't sent in the clear.
+2. Replace HTTP Basic with session or token auth (e.g. a signed cookie
+   session with login/logout, or short-lived JWTs) — Basic has no expiry or
+   revocation, which is a bigger problem once it's internet-facing.
+3. Add login rate-limiting, since Basic auth as implemented here has no
+   brute-force protection.
+
 ## Database (PostgreSQL)
 
 Enter/exit events (`EventLog` in [human_detection.py](human_detection.py)) are

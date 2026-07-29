@@ -7,6 +7,7 @@ EventLog/zone-gating) on a background thread, and serves:
   GET /video_feed   MJPEG stream of the latest annotated frame
   GET /api/occupancy  current human count + who is currently present
   GET /api/events     recent enter/exit history from the events database
+  GET /api/stream     SSE feed pushing occupancy + zone-status on change
 
 Meant to be started via `python human_detection.py --web`, which bootstraps
 uvicorn bound to a LAN-reachable interface (0.0.0.0 by default).
@@ -28,7 +29,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-import human_detection as hd
+import pipeline
+from identity import PEOPLE_STORE
+from zones import ZONES_PATH, bump_zones_version
 
 app = FastAPI(title="Human Detection Dashboard")
 templates = Jinja2Templates(directory="templates")
@@ -65,7 +68,7 @@ def require_auth(credentials: HTTPBasicCredentials = Depends(_security)):
         )
     return credentials.username
 
-state = hd.DetectionState()
+state = pipeline.DetectionState()
 _detection_thread = None
 _thread_lock = threading.Lock()
 _show_window = False
@@ -78,7 +81,7 @@ def _start_detection():
             return False
         state.reset_stop()
         _detection_thread = threading.Thread(
-            target=hd.run_detection,
+            target=pipeline.run_detection,
             kwargs={"state": state, "show_window": _show_window},
             daemon=True,
         )
@@ -99,8 +102,8 @@ def _events_db_readonly():
     """Separate connection to the events database so the dashboard never
     contends with the detection loop's own writer connection."""
     conn = psycopg2.connect(
-        host=hd.DB_HOST, port=hd.DB_PORT, dbname=hd.DB_NAME,
-        user=hd.DB_USER, password=hd.DB_PASSWORD,
+        host=pipeline.DB_HOST, port=pipeline.DB_PORT, dbname=pipeline.DB_NAME,
+        user=pipeline.DB_USER, password=pipeline.DB_PASSWORD,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
     conn.autocommit = True
@@ -108,8 +111,8 @@ def _events_db_readonly():
 
 
 def _load_zones_file():
-    if os.path.exists(hd.ZONES_PATH):
-        with open(hd.ZONES_PATH) as f:
+    if os.path.exists(ZONES_PATH):
+        with open(ZONES_PATH) as f:
             data = json.load(f)
     else:
         data = {}
@@ -119,9 +122,50 @@ def _load_zones_file():
 
 
 def _save_zones_file(data):
-    with open(hd.ZONES_PATH, "w") as f:
+    with open(ZONES_PATH, "w") as f:
         json.dump(data, f, indent=2)
-    hd.bump_zones_version()
+    bump_zones_version()
+
+
+VALID_ZONE_TYPES = {"door", "wall", "window"}
+MAX_ZONE_NAME_LEN = 100
+MAX_ZONE_POINTS = 100
+MIN_ZONE_POINTS = 3
+
+
+def _validate_zone_name(name):
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    if len(name) > MAX_ZONE_NAME_LEN:
+        raise HTTPException(status_code=400, detail=f"name must be at most {MAX_ZONE_NAME_LEN} characters")
+    return name.strip()
+
+
+def _validate_zone_type(zone_type):
+    if zone_type not in VALID_ZONE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid type: {zone_type}")
+    return zone_type
+
+
+def _validate_zone_points(points):
+    if not isinstance(points, list) or not (MIN_ZONE_POINTS <= len(points) <= MAX_ZONE_POINTS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"points must be a list of {MIN_ZONE_POINTS}-{MAX_ZONE_POINTS} [x, y] pairs",
+        )
+    dims = state.dims()
+    max_w, max_h = dims.get("orig_w") or 0, dims.get("orig_h") or 0
+    cleaned = []
+    for pt in points:
+        if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+            raise HTTPException(status_code=400, detail="each point must be an [x, y] pair")
+        x, y = pt
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            raise HTTPException(status_code=400, detail="point coordinates must be numeric")
+        if max_w and max_h and not (0 <= x <= max_w and 0 <= y <= max_h):
+            raise HTTPException(status_code=400, detail="point coordinates must be within frame bounds")
+        cleaned.append([x, y])
+    return cleaned
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -148,8 +192,7 @@ def video_feed(_user: str = Depends(require_auth)):
     )
 
 
-@app.get("/api/occupancy")
-def api_occupancy(_user: str = Depends(require_auth)):
+def _build_occupancy_payload():
     snap = state.snapshot()
     conn = _events_db_readonly()
     try:
@@ -169,7 +212,7 @@ def api_occupancy(_user: str = Depends(require_auth)):
         conn.close()
 
     live_present = snap["present_person_ids"]
-    names = hd.PEOPLE_STORE.all()
+    names = PEOPLE_STORE.all()
     people = [
         {
             "person_id": row["person_id"],
@@ -186,15 +229,18 @@ def api_occupancy(_user: str = Depends(require_auth)):
         people.append({"person_id": person_id, "name": names.get(person_id), "status": "IN", "since": None})
     people.sort(key=lambda p: p["person_id"])
     unique_count = len(known_ids | live_present)
-    return JSONResponse(
-        {
-            "count": snap["count"],
-            "fps": round(snap["fps"], 1),
-            "detector_running": snap["running"],
-            "unique_count": unique_count,
-            "people": people,
-        }
-    )
+    return {
+        "count": snap["count"],
+        "fps": round(snap["fps"], 1),
+        "detector_running": snap["running"],
+        "unique_count": unique_count,
+        "people": people,
+    }
+
+
+@app.get("/api/occupancy")
+def api_occupancy(_user: str = Depends(require_auth)):
+    return JSONResponse(_build_occupancy_payload())
 
 
 @app.post("/api/start")
@@ -234,7 +280,7 @@ def api_events(limit: int = 50, _user: str = Depends(require_auth)):
     finally:
         conn.close()
 
-    names = hd.PEOPLE_STORE.all()
+    names = PEOPLE_STORE.all()
     return JSONResponse(
         {
             "events": [
@@ -257,7 +303,7 @@ def api_live_tracks(_user: str = Depends(require_auth)):
     names, for the People tab overlay. Reuses /api/zone-snapshot's image
     and /api/zone-snapshot/meta's dims for coordinate scaling."""
     boxes = state.live_boxes()
-    names = hd.PEOPLE_STORE.all()
+    names = PEOPLE_STORE.all()
     return JSONResponse(
         {
             "people": [
@@ -274,7 +320,7 @@ def api_live_tracks(_user: str = Depends(require_auth)):
 
 @app.get("/api/people")
 def api_people(_user: str = Depends(require_auth)):
-    names = hd.PEOPLE_STORE.all()
+    names = PEOPLE_STORE.all()
     return JSONResponse(
         {"people": [{"person_id": pid, "name": name} for pid, name in sorted(names.items())]}
     )
@@ -286,19 +332,19 @@ async def api_set_person_name(person_id: int, request: Request, _user: str = Dep
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
-    hd.PEOPLE_STORE.set(person_id, name)
+    PEOPLE_STORE.set(person_id, name)
     return JSONResponse({"person_id": person_id, "name": name})
 
 
 @app.delete("/api/people/{person_id}")
 def api_delete_person_name(person_id: int, _user: str = Depends(require_auth)):
-    hd.PEOPLE_STORE.delete(person_id)
+    PEOPLE_STORE.delete(person_id)
     return JSONResponse({"ok": True})
 
 
 @app.get("/api/box-color")
 def api_get_box_color(_user: str = Depends(require_auth)):
-    b, g, r = hd.BOX_COLOR
+    b, g, r = pipeline.BOX_COLOR
     return JSONResponse({"color": "#{:02x}{:02x}{:02x}".format(r, g, b)})
 
 
@@ -309,7 +355,7 @@ async def api_set_box_color(request: Request, _user: str = Depends(require_auth)
     if len(color) != 6 or any(c not in "0123456789abcdefABCDEF" for c in color):
         raise HTTPException(status_code=400, detail="color must be a #rrggbb hex string")
     r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
-    hd.BOX_COLOR = (b, g, r)
+    pipeline.BOX_COLOR = (b, g, r)
     return JSONResponse({"ok": True, "color": "#" + color})
 
 
@@ -342,9 +388,9 @@ async def api_create_zone(request: Request, _user: str = Depends(require_auth)):
         raise HTTPException(status_code=400, detail=f"Invalid task: {task}")
     zone = {
         "id": secrets.token_hex(4),
-        "name": body["name"],
-        "type": body["type"],
-        "points": body["points"],
+        "name": _validate_zone_name(body.get("name")),
+        "type": _validate_zone_type(body.get("type")),
+        "points": _validate_zone_points(body.get("points")),
         "task": task,
         "created_at": datetime.utcnow().isoformat(),
     }
@@ -367,9 +413,11 @@ async def api_update_zone(zone_id: str, request: Request, _user: str = Depends(r
             raise HTTPException(status_code=400, detail=f"Invalid task: {body['task']}")
         zone["task"] = body["task"]
     if "name" in body:
-        zone["name"] = body["name"]
+        zone["name"] = _validate_zone_name(body["name"])
     if "type" in body:
-        zone["type"] = body["type"]
+        zone["type"] = _validate_zone_type(body["type"])
+    if "points" in body:
+        zone["points"] = _validate_zone_points(body["points"])
 
     _save_zones_file(data)
     return JSONResponse(zone)
@@ -383,8 +431,7 @@ def api_delete_zone(zone_id: str, _user: str = Depends(require_auth)):
     return JSONResponse({"ok": True})
 
 
-@app.get("/api/zone-status")
-def api_zone_status(_user: str = Depends(require_auth)):
+def _build_zone_status_payload():
     data = _load_zones_file()
     zone_status = state.zone_status()
     result = []
@@ -407,7 +454,52 @@ def api_zone_status(_user: str = Depends(require_auth)):
                 "alert": alert,
             }
         )
-    return JSONResponse({"zones": result})
+    return {"zones": result}
+
+
+@app.get("/api/zone-status")
+def api_zone_status(_user: str = Depends(require_auth)):
+    return JSONResponse(_build_zone_status_payload())
+
+
+# Occupancy needs a Postgres round-trip per build; zone-status is pure
+# in-memory. Rate-limit the DB-backed half independently of the SSE push
+# loop's tick rate so N connected clients don't multiply DB load.
+OCCUPANCY_REFRESH_SECONDS = 1.0
+
+
+@app.get("/api/stream")
+def api_stream(_user: str = Depends(require_auth)):
+    """Server-Sent Events feed combining occupancy + zone-status, replacing
+    1s client-side polling of /api/occupancy and /api/zone-status. Pushes a
+    new event only when the underlying payload actually changes."""
+
+    def generate():
+        last_occupancy = None
+        last_occupancy_json = None
+        last_zone_json = None
+        last_occupancy_fetch = 0.0
+        try:
+            while True:
+                now = time.monotonic()
+                if now - last_occupancy_fetch >= OCCUPANCY_REFRESH_SECONDS:
+                    last_occupancy = _build_occupancy_payload()
+                    last_occupancy_fetch = now
+                    occupancy_json = json.dumps(last_occupancy)
+                    if occupancy_json != last_occupancy_json:
+                        last_occupancy_json = occupancy_json
+                        yield f"event: occupancy\ndata: {occupancy_json}\n\n"
+
+                zone_json = json.dumps(_build_zone_status_payload())
+                if zone_json != last_zone_json:
+                    last_zone_json = zone_json
+                    yield f"event: zone-status\ndata: {zone_json}\n\n"
+
+                time.sleep(0.2)
+        except GeneratorExit:
+            pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 def serve_dashboard(host="0.0.0.0", port=8000, show_window=False):

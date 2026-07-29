@@ -17,6 +17,9 @@ that must never land in config.yaml or get committed.
 import os
 
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 

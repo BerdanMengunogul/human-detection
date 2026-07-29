@@ -56,3 +56,10 @@
 # DB_PORT: 5433
 # DB_NAME: human_detection
 # DB_USER: postgres
+
+# --- ntfy.sh push notifications for zone alerts ---
+# Set NTFY_TOPIC to enable; leave empty/unset to disable. Pick a hard-to-
+# guess topic name - anyone who knows it can read your alerts on public
+# ntfy.sh, or self-host and point NTFY_SERVER at your own instance.
+# NTFY_SERVER: https://ntfy.sh
+# NTFY_TOPIC: ""

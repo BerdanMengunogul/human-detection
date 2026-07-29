@@ -101,9 +101,9 @@ Also address stable identity keys (item 6): decide whether names should bind to 
 
 ## Phase 8 — Product/UX (defer until above is stable)
 
-1. Real alert delivery: sound, webhook, or push — ask user which integration they actually want (e.g. ntfy, Discord webhook, email) before building.
-2. Clarify occupancy metrics: separate "currently in room" (live track count) from "all-time unique persons" (DB history) in the UI, since item 25 notes they're currently conflated.
-3. Reconcile the People-naming vs Occupancy "Saved persons" duplication and add a confirmation step before destructive Reset actions.
+1. [x] Real alert delivery via ntfy push notifications. New `notify.py` posts to `NTFY_SERVER`/`NTFY_TOPIC` (config.py, empty topic disables) using stdlib `urllib` in a daemon thread so a slow/unreachable ntfy server never blocks the request. Wired into `_build_zone_status_payload()` (`webapp.py`): fires once per false→true transition of a zone's `alert` flag (tracked in `_last_zone_alert`), not on every poll/SSE tick.
+2. [x] Split the conflated occupancy metric into two: `_build_occupancy_payload()` (`webapp.py`) now returns `in_room_count` (`len(live_present)` — live tracker state, "currently in room") and `total_unique_count` (`len(known_ids | live_present)` — all-time distinct person_ids from DB history union'd with any live-but-not-yet-logged tracks, so it never undercounts). API field `unique_count` renamed to `total_unique_count`. UI (`templates/index.html`, `static/app.js`) shows both as separate stat tiles: "In room now" and "Total unique seen".
+3. [x] Reconciled the People-naming vs Occupancy "Saved persons" duplication: Occupancy's table is relabeled "People" with a "Manage names →" link that jumps to the People tab (`templates/index.html`, `static/app.js`), and the People tab notes that live status lives on Occupancy — naming/deletion stays exclusively on the People tab rather than merging the two tables. Added a `confirm()` guard to the People tab's per-row Delete button (`static/app.js`), matching the existing confirmation pattern already used by the reset buttons and zone delete.
 
 ---
 

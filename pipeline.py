@@ -27,9 +27,11 @@ from zones import (
     WebZonesStore,
     point_in_polygon,
     _foot_point_in_any_zone,
+    split_ignore_zones,
 )
 from events import EventLog
 from stream import LatestFrameReader, open_stream
+from dataset_collector import DatasetCollector
 
 _cfg = _config.load()
 
@@ -310,6 +312,17 @@ class DetectionState:
         return False
 
 
+def compute_seen_track_ids(track_ids, ignored_track_ids):
+    """Returns the set of track_ids the tracker reported this frame that were
+    actually processed (i.e. not discarded for being inside an ignore zone).
+    A track_id skipped via the ignore-zone check must not count as "seen" -
+    otherwise it never enters the missing-track/EXIT_GRACE_SECONDS logic and
+    a person who walks into an ignore zone is never marked EXIT."""
+    if track_ids is None:
+        return set()
+    return {int(tid) for tid in track_ids.tolist()} - ignored_track_ids
+
+
 def run_detection(state=None, show_window=True):
     """Runs the detection loop. If `state` (a DetectionState) is given, every
     annotated frame is published there for a web server to stream; if
@@ -321,6 +334,7 @@ def run_detection(state=None, show_window=True):
     reid_encoder = load_reid_encoder()
     face_analyzer = load_face_analyzer()
     gallery = PersonGallery()
+    dataset_collector = DatasetCollector(_cfg)
     event_log = EventLog(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     track_to_person = {}  # BoT-SORT track_id -> Person-N id (persists until track drops)
     pending_tracks = {}  # track_id -> list of (score, bbox crop, local xywh) candidates
@@ -342,12 +356,14 @@ def run_detection(state=None, show_window=True):
     cached_pose_keypoints_conf = []
 
     web_zones_store = WebZonesStore()
-    web_zones = web_zones_store.zones
+    web_zones, ignore_zones = split_ignore_zones(web_zones_store.zones)
     if web_zones:
         print(f"[ZONES] Loaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
     else:
         print("[ZONES] No web zones configured - ENTER/EXIT events will not be zone-gated "
               "(falling back to appear/disappear behavior). Draw zones from the web dashboard.")
+    if ignore_zones:
+        print(f"[ZONES] Loaded {len(ignore_zones)} ignore zone(s) - detections inside will be discarded")
     zone_occupants_prev = {z["id"]: set() for z in web_zones}  # zone_id -> person_ids inside last frame
 
     cap = open_stream()
@@ -384,9 +400,10 @@ def run_detection(state=None, show_window=True):
                 for zone_id in zone_occupants_prev:
                     zone_occupants_prev[zone_id] = set()
             if web_zones_store.maybe_reload():
-                web_zones = web_zones_store.zones
+                web_zones, ignore_zones = split_ignore_zones(web_zones_store.zones)
                 zone_occupants_prev = merge_zone_occupants(zone_occupants_prev, web_zones)
-                print(f"[ZONES] Reloaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
+                print(f"[ZONES] Reloaded {len(web_zones)} door zone(s), "
+                      f"{len(ignore_zones)} ignore zone(s) from {ZONES_PATH}")
             ret, frame = reader.read()
             if not ret or frame is None:
                 print("[WARNING] Waiting for frame from stream...")
@@ -425,6 +442,7 @@ def run_detection(state=None, show_window=True):
 
             human_count = 0
             zone_occupants_now = {}  # zone_id -> person_ids inside this frame
+            ignored_track_ids_this_frame = set()  # track_ids skipped this frame for being inside an ignore zone
             boxes = results.boxes
             track_ids = boxes.id
             for i, box in enumerate(boxes):
@@ -457,6 +475,9 @@ def run_detection(state=None, show_window=True):
 
                 track_id = int(track_ids[i])
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
+                if ignore_zones and _foot_point_in_any_zone(x1, y1, x2, y2, ignore_zones):
+                    ignored_track_ids_this_frame.add(track_id)
+                    continue
                 track_last_box[track_id] = (x1, y1, x2, y2)
                 track_coast_frames[track_id] = 0
                 sx1, sy1, sx2, sy2 = _smoothed_box(
@@ -534,6 +555,7 @@ def run_detection(state=None, show_window=True):
                     track_to_person[track_id] = gallery.identify_many(
                         embeddings, face_embedding, reject_id=_has_other_live_track
                     )
+                    dataset_collector.save(track_to_person[track_id], top_candidates[0][1])
                     track_last_topup_time[track_id] = time.time()
                     pending_track_first_seen.pop(track_id, None)
                     new_person_id = track_to_person[track_id]
@@ -561,6 +583,9 @@ def run_detection(state=None, show_window=True):
                                 stage_timer.add("face_topup", time.time() - _t0)
                             if emb is not None or face_embedding is not None:
                                 gallery.add_sample(track_to_person[track_id], emb, face_embedding)
+                                cx1, cy1 = max(int(x1), 0), max(int(y1), 0)
+                                cx2, cy2 = min(int(x2), frame_w), min(int(y2), frame_h)
+                                dataset_collector.save(track_to_person[track_id], frame[cy1:cy2, cx1:cx2])
                         track_last_topup_time[track_id] = time.time()
                 person_id = track_to_person[track_id]
                 track_last_box[track_id] = (x1, y1, x2, y2)
@@ -592,9 +617,7 @@ def run_detection(state=None, show_window=True):
                         pose_keypoints_conf[best_pose_idx],
                     )
 
-            seen_track_ids = set()
-            if track_ids is not None:
-                seen_track_ids = {int(tid) for tid in track_ids.tolist()}
+            seen_track_ids = compute_seen_track_ids(track_ids, ignored_track_ids_this_frame)
             for seen_track_id in seen_track_ids:
                 track_missing_since.pop(seen_track_id, None)
             known_track_ids = (

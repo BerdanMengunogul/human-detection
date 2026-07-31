@@ -13,3 +13,11 @@ door_zones.version
 .env
 config.yaml
 .claude/scheduled_tasks.lock
+/dataset/
+/dataset_named/
+/contact_sheets/
+*.jpg
+*.jpeg
+*.png
+*.bak-*
+dashboard_pid.txt

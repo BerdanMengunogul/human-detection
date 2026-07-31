@@ -13,6 +13,7 @@ Meant to be started via `python human_detection.py --web`, which bootstraps
 uvicorn bound to a LAN-reachable interface (0.0.0.0 by default).
 """
 
+import asyncio
 import json
 import os
 import secrets
@@ -176,7 +177,7 @@ def index(request: Request, _user: str = Depends(require_auth)):
 
 @app.get("/video_feed")
 def video_feed(_user: str = Depends(require_auth)):
-    def generate():
+    async def generate():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
         state.add_viewer()
         try:
@@ -184,7 +185,7 @@ def video_feed(_user: str = Depends(require_auth)):
                 jpeg = state.latest_jpeg()
                 if jpeg is not None:
                     yield boundary + jpeg + b"\r\n"
-                time.sleep(0.05)
+                await asyncio.sleep(0.05)
         finally:
             state.remove_viewer()
 
@@ -365,7 +366,16 @@ async def api_set_box_color(request: Request, _user: str = Depends(require_auth)
 
 @app.get("/api/zone-snapshot")
 def api_zone_snapshot(_user: str = Depends(require_auth)):
+    state.request_snapshot()
     jpeg = state.latest_jpeg()
+    if jpeg is None:
+        # Encode loop only just found out someone wants a frame; give it a
+        # couple of frame-intervals to produce one before giving up.
+        for _ in range(10):
+            time.sleep(0.1)
+            jpeg = state.latest_jpeg()
+            if jpeg is not None:
+                break
     if jpeg is None:
         raise HTTPException(status_code=503, detail="No frame available yet")
     return Response(content=jpeg, media_type="image/jpeg")
@@ -381,7 +391,7 @@ def api_zones(_user: str = Depends(require_auth)):
     return JSONResponse(_load_zones_file()["web_zones"])
 
 
-VALID_ZONE_TASKS = {"none", "alert_entry", "alert_presence"}
+VALID_ZONE_TASKS = {"none", "alert_entry", "alert_presence", "ignore"}
 
 
 @app.post("/api/zones")
@@ -486,7 +496,7 @@ def api_stream(_user: str = Depends(require_auth)):
     1s client-side polling of /api/occupancy and /api/zone-status. Pushes a
     new event only when the underlying payload actually changes."""
 
-    def generate():
+    async def generate():
         last_occupancy = None
         last_occupancy_json = None
         last_zone_json = None
@@ -495,7 +505,7 @@ def api_stream(_user: str = Depends(require_auth)):
             while True:
                 now = time.monotonic()
                 if now - last_occupancy_fetch >= OCCUPANCY_REFRESH_SECONDS:
-                    last_occupancy = _build_occupancy_payload()
+                    last_occupancy = await asyncio.to_thread(_build_occupancy_payload)
                     last_occupancy_fetch = now
                     occupancy_json = json.dumps(last_occupancy)
                     if occupancy_json != last_occupancy_json:
@@ -507,7 +517,7 @@ def api_stream(_user: str = Depends(require_auth)):
                     last_zone_json = zone_json
                     yield f"event: zone-status\ndata: {zone_json}\n\n"
 
-                time.sleep(0.2)
+                await asyncio.sleep(0.2)
         except GeneratorExit:
             pass
 

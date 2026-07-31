@@ -47,6 +47,11 @@ class LatestFrameReader:
         self._frame = None
         self._ok = False
         self._stopped = False
+        # Bumped on every successful grab. The consumer compares it against the
+        # sequence it last processed so it can tell "the camera has a new frame"
+        # from "I looped faster than the camera and this is the same image."
+        self._seq = 0
+        self._new_frame = threading.Condition(self._lock)
         self._thread = threading.Thread(target=self._update, daemon=True)
         self._thread.start()
 
@@ -76,9 +81,12 @@ class LatestFrameReader:
     def _update(self):
         while not self._stopped:
             ok, frame = self._cap.read()
-            with self._lock:
+            with self._new_frame:
                 self._ok = ok
                 self._frame = frame
+                if ok:
+                    self._seq += 1
+                self._new_frame.notify_all()
             if not ok:
                 self._reconnect()
 
@@ -86,8 +94,27 @@ class LatestFrameReader:
         with self._lock:
             return self._ok, self._frame
 
+    def read_latest(self, last_seq, timeout=1.0):
+        """Return (ok, frame, seq), blocking until the grabber has a frame newer
+        than `last_seq`.
+
+        Waiting here rather than re-running detection on an already-processed
+        image is what keeps the displayed frame current: the consumer spends its
+        idle time parked on the condition variable and picks up each new frame
+        the instant it lands, instead of finishing a redundant inference pass
+        first and showing a frame that is by then one whole cycle old.
+        """
+        with self._new_frame:
+            if self._seq == last_seq:
+                self._new_frame.wait(timeout)
+            return self._ok, self._frame, self._seq
+
     def stop(self):
         self._stopped = True
+        with self._new_frame:
+            # Wake any consumer parked in read_latest so stop() can't block for
+            # the full timeout on shutdown.
+            self._new_frame.notify_all()
         self._thread.join(timeout=2)
         try:
             self._cap.release()

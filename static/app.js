@@ -293,8 +293,8 @@ function resizeZoneCanvas() {
 function drawZoneOverlay() {
   zoneCtx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
 
-  zoneCtx.strokeStyle = "#4da3ff";
-  zoneCtx.fillStyle = "rgba(77, 163, 255, 0.2)";
+  zoneCtx.strokeStyle = "#baf7c9";
+  zoneCtx.fillStyle = "rgba(186, 247, 201, 0.2)";
   zoneCtx.lineWidth = 2;
 
   if (zonePoints.length > 0) {
@@ -311,7 +311,7 @@ function drawZoneOverlay() {
       const p = nativeToCanvasCss(pt);
       zoneCtx.beginPath();
       zoneCtx.arc(p[0], p[1], i === 0 ? 5 : 3, 0, Math.PI * 2);
-      zoneCtx.fillStyle = i === 0 ? "#4da3ff" : "#e8eaf0";
+      zoneCtx.fillStyle = i === 0 ? "#baf7c9" : "#d3ddd6";
       zoneCtx.fill();
     });
   }
@@ -326,15 +326,15 @@ function drawZoneOverlay() {
       zoneCtx.lineTo(p[0], p[1]);
     }
     zoneCtx.closePath();
-    zoneCtx.strokeStyle = "#4caf50";
-    zoneCtx.fillStyle = "rgba(76, 175, 80, 0.12)";
+    zoneCtx.strokeStyle = "#baf7c9";
+    zoneCtx.fillStyle = "rgba(186, 247, 201, 0.12)";
     zoneCtx.stroke();
     zoneCtx.fill();
   });
 }
 
 function closeZonePolygon() {
-  zoneCtx.fillStyle = "rgba(77, 163, 255, 0.2)";
+  zoneCtx.fillStyle = "rgba(186, 247, 201, 0.2)";
   zoneCtx.beginPath();
   const start = nativeToCanvasCss(zonePoints[0]);
   zoneCtx.moveTo(start[0], start[1]);
@@ -414,6 +414,7 @@ const TASK_LABELS = {
   none: "No task",
   alert_entry: "Alert on entry",
   alert_presence: "Alert on presence",
+  ignore: "Ignore (don't scan)",
 };
 
 async function refreshZones() {
@@ -566,7 +567,7 @@ let peopleLiveTimer = null;
 
 const TRACK_COLOR_STORAGE_KEY = "trackBorderColor";
 const trackColorInput = document.getElementById("track-color-input");
-let trackBorderColor = localStorage.getItem(TRACK_COLOR_STORAGE_KEY) || "#4caf50";
+let trackBorderColor = localStorage.getItem(TRACK_COLOR_STORAGE_KEY) || "#baf7c9";
 trackColorInput.value = trackBorderColor;
 
 fetch("/api/box-color")
@@ -617,14 +618,14 @@ function drawPeopleOverlay() {
     const [x1, y1] = peopleNativeToCanvasCss(p.box[0], p.box[1]);
     const [x2, y2] = peopleNativeToCanvasCss(p.box[2], p.box[3]);
     const selected = p.person_id === selectedPersonId;
-    peopleCtx.strokeStyle = selected ? "#4da3ff" : trackBorderColor;
+    peopleCtx.strokeStyle = selected ? "#baf7c9" : trackBorderColor;
     peopleCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
     const label = p.name || `Person-${p.person_id}`;
     const textWidth = peopleCtx.measureText(label).width;
-    peopleCtx.fillStyle = selected ? "#4da3ff" : trackBorderColor;
+    peopleCtx.fillStyle = selected ? "#baf7c9" : trackBorderColor;
     peopleCtx.fillRect(x1, Math.max(0, y1 - 18), textWidth + 8, 18);
-    peopleCtx.fillStyle = "#0b0d12";
+    peopleCtx.fillStyle = "#0a0d0a";
     peopleCtx.fillText(label, x1 + 4, Math.max(12, y1 - 5));
   });
 }

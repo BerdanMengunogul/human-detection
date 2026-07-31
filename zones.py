@@ -9,6 +9,7 @@ _cfg = _config.load()
 
 ZONES_PATH = _cfg.ZONES_PATH
 ZONES_VERSION_PATH = _cfg.ZONES_VERSION_PATH
+IGNORE_ZONE_MIN_OVERLAP = _cfg.IGNORE_ZONE_MIN_OVERLAP
 
 
 def read_zones_version():
@@ -103,3 +104,42 @@ def _foot_point_in_any_zone(x1, y1, x2, y2, zones):
     foot_x = (x1 + x2) / 2
     foot_y = y2
     return any(point_in_polygon(foot_x, foot_y, wz["points"]) for wz in zones)
+
+
+def _box_overlaps_zone(x1, y1, x2, y2, zone, min_fraction):
+    """True if at least `min_fraction` of box (x1,y1,x2,y2) lies inside the
+    zone polygon, approximated by sampling a grid of points across the box."""
+    steps = 5
+    inside = 0
+    for i in range(steps):
+        px = x1 + (x2 - x1) * (i + 0.5) / steps
+        for j in range(steps):
+            py = y1 + (y2 - y1) * (j + 0.5) / steps
+            if point_in_polygon(px, py, zone["points"]):
+                inside += 1
+    return inside / (steps * steps) >= min_fraction
+
+
+def box_in_any_ignore_zone(x1, y1, x2, y2, zones,
+                           min_fraction=IGNORE_ZONE_MIN_OVERLAP):
+    """True if box (x1,y1,x2,y2) is mostly inside any ignore zone.
+
+    Unlike `_foot_point_in_any_zone`, this tests the whole box. An ignore zone
+    marks a region where detections aren't real people at all (a TV, a poster,
+    a mirror), so a figure on a screen must be discarded regardless of where
+    its feet land -- a waist-up figure on a monitor has its foot point in the
+    middle of the screen, or above the zone entirely, and a foot-point test
+    lets it through. Door zones keep the foot-point test, where "which side of
+    the threshold is this person standing on" is exactly the right question."""
+    return any(
+        _box_overlaps_zone(x1, y1, x2, y2, wz, min_fraction) for wz in zones
+    )
+
+
+def split_ignore_zones(web_zones):
+    """Splits loaded web zones into (door_zones, ignore_zones). Zones tasked
+    "ignore" are excluded from door/occupancy logic entirely and used only
+    to blank out detections before tracking sees them."""
+    ignore_zones = [z for z in web_zones if z.get("task") == "ignore"]
+    door_zones = [z for z in web_zones if z.get("task") != "ignore"]
+    return door_zones, ignore_zones

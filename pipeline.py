@@ -27,6 +27,7 @@ from zones import (
     WebZonesStore,
     point_in_polygon,
     _foot_point_in_any_zone,
+    box_in_any_ignore_zone,
     split_ignore_zones,
 )
 from events import EventLog
@@ -36,6 +37,26 @@ from dataset_collector import DatasetCollector
 _cfg = _config.load()
 
 DEVICE = 0 if torch.cuda.is_available() else "cpu"
+
+INFER_IMGSZ = _cfg.INFER_IMGSZ
+# fp16 is a real speedup on the GPU but emulated (slower) on CPU.
+INFER_HALF = _cfg.INFER_HALF and DEVICE == 0
+TARGET_FPS = _cfg.TARGET_FPS
+JPEG_QUALITY = _cfg.JPEG_QUALITY
+# How long a /api/zone-snapshot request keeps the encode loop "warm" for,
+# so a poller (Zones/People tab) gets fresh frames like an MJPEG viewer does.
+SNAPSHOT_VIEWER_TIMEOUT = 5.0
+
+# Extra kwargs shared by the detect and pose calls. Built once so the
+# per-frame call sites stay readable and the two models can't drift apart.
+# Ultralytics 8.4 replaced the `half` flag with `quantize`, where 16 means fp16;
+# passing `half` still works but emits a deprecation warning on every single
+# call, which would flood the log at ~20 calls a second.
+_INFER_KWARGS = {}
+if INFER_HALF:
+    _INFER_KWARGS["quantize"] = 16
+if INFER_IMGSZ:
+    _INFER_KWARGS["imgsz"] = INFER_IMGSZ
 
 MODEL_NAME = _cfg.MODEL_NAME
 TRACKER_CONFIG = _cfg.TRACKER_CONFIG
@@ -209,6 +230,7 @@ class DetectionState:
         self._zone_status = {}
         self._live_boxes = {}
         self._viewer_count = 0
+        self._last_snapshot_request = 0.0
 
     def add_viewer(self):
         with self._lock:
@@ -218,9 +240,18 @@ class DetectionState:
         with self._lock:
             self._viewer_count = max(0, self._viewer_count - 1)
 
+    def request_snapshot(self):
+        """Called by /api/zone-snapshot so the encode loop knows a poller
+        (Zones/People tab) wants fresh frames, same as an MJPEG viewer."""
+        with self._lock:
+            self._last_snapshot_request = time.time()
+
     def has_viewers(self):
         with self._lock:
-            return self._viewer_count > 0
+            recent_snapshot_request = (
+                time.time() - self._last_snapshot_request < SNAPSHOT_VIEWER_TIMEOUT
+            )
+            return self._viewer_count > 0 or recent_snapshot_request
 
     def update(self, frame, count, fps, present_person_ids=None,
                orig_w=None, orig_h=None, scale=None, zone_status=None,
@@ -228,7 +259,9 @@ class DetectionState:
         # Skip the JPEG encode (a meaningful chunk of per-frame cost) when
         # nobody is watching /video_feed or requesting a zone snapshot.
         if self.has_viewers():
-            ok, buf = cv2.imencode(".jpg", frame)
+            ok, buf = cv2.imencode(
+                ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+            )
             jpeg = buf.tobytes() if ok else None
         else:
             jpeg = None
@@ -312,6 +345,30 @@ class DetectionState:
         return False
 
 
+def should_enter(person_id, present_person_ids):
+    """True if a person who was just identified should be marked ENTER (added
+    to present_person_ids, which is what makes them show up as a clickable,
+    nameable box in the People tab via live_boxes). Door-zone crossing is
+    deliberately not a factor: door zones are narrow strips near the frame
+    edges, so a lone person who stays in the middle of the room never has a
+    foot-point inside one, and gating ENTER on that leaves them with no box
+    to click at all -- unable to ever be named. Mirrors the should_exit fix,
+    which removed the same zone gate from the other side of presence."""
+    return person_id not in present_person_ids
+
+
+def should_exit(still_present, person_id, present_person_ids):
+    """True if a person whose track just went missing (past EXIT_GRACE_SECONDS)
+    should be marked EXIT. Door-zone position at the moment tracking was lost
+    is deliberately not a factor: someone who exits by walking out of camera
+    view (the common case) is rarely standing in a door polygon on their last
+    tracked frame, since door zones are narrow strips near the frame edges.
+    Gating EXIT on that would leave them stuck "present" forever with no
+    recovery path. ENTER no longer gates on door zones either (see
+    should_enter above) -- both directions of presence are now zone-free."""
+    return not still_present and person_id in present_person_ids
+
+
 def compute_seen_track_ids(track_ids, ignored_track_ids):
     """Returns the set of track_ids the tracker reported this frame that were
     actually processed (i.e. not discarded for being inside an ignore zone).
@@ -339,7 +396,6 @@ def run_detection(state=None, show_window=True):
     track_to_person = {}  # BoT-SORT track_id -> Person-N id (persists until track drops)
     pending_tracks = {}  # track_id -> list of (score, bbox crop, local xywh) candidates
     pending_track_first_seen = {}  # track_id -> time.time() when first added to pending_tracks
-    pending_track_zone_hit = {}  # track_id -> was its foot-point ever inside a web_zone while pending
     track_last_topup_time = {}  # track_id -> time.time() of last gallery top-up
     track_missing_since = {}  # track_id -> time.time() when it first went missing from tracker output
     present_person_ids = set()  # Person-N ids currently considered "in" (ENTER logged, no EXIT yet)
@@ -374,6 +430,13 @@ def run_detection(state=None, show_window=True):
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     prev_time = time.time()
     recent_counts = deque(maxlen=COUNT_SMOOTHING_WINDOW)
+    last_frame_seq = 0
+    # Reported FPS is smoothed over a short window. The raw 1/dt of a single
+    # frame swings wildly with how many people are in view, which makes a
+    # steady pipeline look erratic on the dashboard.
+    recent_frame_times = deque(maxlen=15)
+    min_frame_interval = 1.0 / TARGET_FPS if TARGET_FPS > 0 else 0.0
+    next_frame_deadline = time.time()
 
     if state is not None:
         state.mark_running(True)
@@ -404,7 +467,20 @@ def run_detection(state=None, show_window=True):
                 zone_occupants_prev = merge_zone_occupants(zone_occupants_prev, web_zones)
                 print(f"[ZONES] Reloaded {len(web_zones)} door zone(s), "
                       f"{len(ignore_zones)} ignore zone(s) from {ZONES_PATH}")
-            ret, frame = reader.read()
+            # Pace the loop to TARGET_FPS. read_latest already blocks until the
+            # camera has a genuinely new frame, so this only bites when the
+            # source runs faster than we want to process; sleeping the
+            # remainder here (rather than after the read) means the frame we
+            # then pick up is the freshest one, not one aged by the wait.
+            if min_frame_interval:
+                slack = next_frame_deadline - time.time()
+                if slack > 0:
+                    time.sleep(slack)
+                next_frame_deadline = max(
+                    time.time(), next_frame_deadline + min_frame_interval
+                )
+
+            ret, frame, last_frame_seq = reader.read_latest(last_frame_seq)
             if not ret or frame is None:
                 print("[WARNING] Waiting for frame from stream...")
                 time.sleep(0.1)
@@ -414,6 +490,7 @@ def run_detection(state=None, show_window=True):
                 _t0 = time.time()
             results = model.track(
                 frame, persist=True, tracker=TRACKER_CONFIG, device=DEVICE, verbose=False,
+                conf=CONF_THRESHOLD, **_INFER_KWARGS,
             )[0]
             if stage_timer is not None:
                 stage_timer.add("track", time.time() - _t0)
@@ -421,7 +498,10 @@ def run_detection(state=None, show_window=True):
             if stage_timer is not None:
                 _t0 = time.time()
             if pose_model is not None and pose_frame_counter % POSE_EVERY_N_FRAMES == 0:
-                pose_results = pose_model(frame, conf=POSE_CONF_THRESHOLD, device=DEVICE, verbose=False)[0]
+                pose_results = pose_model(
+                    frame, conf=POSE_CONF_THRESHOLD, device=DEVICE, verbose=False,
+                    **_INFER_KWARGS,
+                )[0]
                 cached_pose_boxes = (
                     pose_results.boxes.xyxy.tolist() if pose_results.boxes is not None else []
                 )
@@ -475,7 +555,7 @@ def run_detection(state=None, show_window=True):
 
                 track_id = int(track_ids[i])
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                if ignore_zones and _foot_point_in_any_zone(x1, y1, x2, y2, ignore_zones):
+                if ignore_zones and box_in_any_ignore_zone(x1, y1, x2, y2, ignore_zones):
                     ignored_track_ids_this_frame.add(track_id)
                     continue
                 track_last_box[track_id] = (x1, y1, x2, y2)
@@ -507,10 +587,6 @@ def run_detection(state=None, show_window=True):
                     candidates = pending_tracks.setdefault(track_id, [])
                     candidates.append((score, crop, xywh))
                     first_seen = pending_track_first_seen.setdefault(track_id, time.time())
-                    in_zone_now = _foot_point_in_any_zone(x1, y1, x2, y2, web_zones)
-                    if in_zone_now:
-                        pending_track_zone_hit[track_id] = True
-
                     elapsed = time.time() - first_seen
                     if len(candidates) < IDENTIFY_MIN_CANDIDATES or elapsed < IDENTIFY_DELAY_SECONDS:
                         human_count += 1
@@ -559,9 +635,7 @@ def run_detection(state=None, show_window=True):
                     track_last_topup_time[track_id] = time.time()
                     pending_track_first_seen.pop(track_id, None)
                     new_person_id = track_to_person[track_id]
-                    now_in_zone = _foot_point_in_any_zone(x1, y1, x2, y2, web_zones)
-                    ever_in_zone = pending_track_zone_hit.pop(track_id, False) or now_in_zone
-                    if new_person_id not in present_person_ids and (not web_zones or ever_in_zone):
+                    if should_enter(new_person_id, present_person_ids):
                         present_person_ids.add(new_person_id)
                         event_log.record(new_person_id, "enter", track_id=track_id)
                 else:
@@ -651,7 +725,6 @@ def run_detection(state=None, show_window=True):
                 # so just discard it.
                 pending_tracks.pop(missing_track_id, None)
                 pending_track_first_seen.pop(missing_track_id, None)
-                pending_track_zone_hit.pop(missing_track_id, None)
                 now = time.time()
                 still_resolving = any(
                     now - first_seen < IDENTIFY_DELAY_SECONDS + EXIT_GRACE_SECONDS
@@ -692,12 +765,8 @@ def run_detection(state=None, show_window=True):
                     for other_tid in seen_track_ids
                     if other_tid != missing_track_id
                 )
-                was_in_zone = person_in_zone.pop(person_id, False)
-                if (
-                    not still_present
-                    and person_id in present_person_ids
-                    and (not web_zones or was_in_zone)
-                ):
+                person_in_zone.pop(person_id, None)
+                if should_exit(still_present, person_id, present_person_ids):
                     present_person_ids.discard(person_id)
                     event_log.record(person_id, "exit", track_id=missing_track_id)
 
@@ -716,8 +785,16 @@ def run_detection(state=None, show_window=True):
             smoothed_count = max(set(recent_counts), key=recent_counts.count)
 
             now = time.time()
-            fps = 1.0 / (now - prev_time) if now != prev_time else 0.0
+            if now > prev_time:
+                recent_frame_times.append(now - prev_time)
             prev_time = now
+            # Mean over the window, not 1/dt of the newest frame: a single slow
+            # frame (someone walks in, identification fires) otherwise makes the
+            # readout jump even though throughput is steady.
+            fps = (
+                len(recent_frame_times) / sum(recent_frame_times)
+                if recent_frame_times else 0.0
+            )
 
             print(f"Humans detected: {smoothed_count} (raw: {human_count}) | FPS: {fps:.1f}")
 

@@ -9,6 +9,23 @@
 # TRACKER_CONFIG: tracker_reid.yaml
 # POSE_MODEL_NAME: yolov8s-pose.pt
 
+# --- Performance ---
+# Inference input size for both the detect and pose models. The camera is
+# 2560x1440 and YOLO otherwise letterboxes to a much larger input; 640 costs
+# almost no recall at room scale and roughly halves detection time.
+# 0 leaves the size to Ultralytics (markedly slower).
+# INFER_IMGSZ: 640
+# FP16 inference. Real speedup on an RTX-class GPU; ignored on CPU, where fp16
+# is emulated and slower.
+# INFER_HALF: true
+# Cap on the main loop's rate. Rarely binds in practice - the frame reader
+# already blocks for a genuinely new frame - but stops a faster source from
+# spinning the loop on frames the camera hasn't replaced yet. 0 disables.
+# TARGET_FPS: 30.0
+# MJPEG stream quality (OpenCV's default is 95, near-lossless). 75 looks
+# near-identical for a monitoring feed at a fraction of the bytes.
+# JPEG_QUALITY: 75
+
 # --- Detection ---
 # PERSON_CLASS_ID: 0
 # CONF_THRESHOLD: 0.5
@@ -27,12 +44,18 @@
 # BOX_COAST_FRAMES: 5
 
 # --- Re-ID ---
-# REID_MATCH_THRESHOLD: 0.4
+# REID_MATCH_THRESHOLD: 0.35
+# REID_BORDERLINE_THRESHOLD: 0.30
+# REID_CORROBORATION_THRESHOLD: 0.25
+# REID_CORROBORATION_MIN_SAMPLES: 2
+# REID_HIGH_CONF_THRESHOLD: 0.6
+# REID_TOPK_MATCH: 3
 # REID_TOPUP_INTERVAL_SECONDS: 2.0
 # REID_MAX_SAMPLES_PER_PERSON: 5
 
 # --- Face ---
 # FACE_MATCH_THRESHOLD: 0.5
+# FACE_HIGH_CONF_THRESHOLD: 0.55
 # FACE_MAX_SAMPLES_PER_PERSON: 5
 # FACE_MIN_BOX_HEIGHT: 40
 
@@ -63,3 +86,11 @@
 # ntfy.sh, or self-host and point NTFY_SERVER at your own instance.
 # NTFY_SERVER: https://ntfy.sh
 # NTFY_TOPIC: ""
+
+# --- ReID training-data collection ---
+# Off by default. When enabled, saves identified/topped-up person crops to
+# <DATASET_PATH>/<person_id>/ for later use in fine-tuning a ReID model.
+# DATASET_COLLECTION_ENABLED: false
+# DATASET_PATH: dataset
+# DATASET_MAX_SAMPLES_PER_PERSON: 200
+# DATASET_MIN_SAVE_INTERVAL_SECONDS: 1.0

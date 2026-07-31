@@ -9,11 +9,12 @@
 <body>
   <header>
     <div class="header-row">
-      <h1>Human Detection Dashboard</h1>
+      <h1><span class="console-slash">//</span>Human Detection<span class="console-slash">/</span>Console</h1>
       <span class="live-indicator" id="conn-indicator" title="Connection status">
         <span class="dot"></span>Live
       </span>
     </div>
+    <span class="rec-tag"><span class="rec-dot"></span>REC</span>
     <nav class="tabs" role="tablist">
       <button class="tab-btn active" data-tab="live" role="tab" aria-selected="true">Live</button>
       <button class="tab-btn" data-tab="occupancy" role="tab" aria-selected="false">Occupancy</button>
@@ -117,6 +118,7 @@
           <option value="none">No task</option>
           <option value="alert_entry">Alert on entry</option>
           <option value="alert_presence">Alert on presence</option>
+          <option value="ignore">Ignore (don't scan)</option>
         </select>
         <button id="zone-undo-btn">Undo point</button>
         <button id="zone-clear-btn">Clear</button>

@@ -32,6 +32,21 @@ _SCHEMA = [
     ("POSE_ENABLED", bool, True),
     ("POSE_EVERY_N_FRAMES", int, 1),
 
+    # Inference input size. The camera is 2560x1440, and YOLO otherwise
+    # letterboxes to a huge input: shrinking to 640 costs almost no recall for
+    # room-scale people while roughly halving detection time. 0 = leave to
+    # Ultralytics (native-ish), which is markedly slower.
+    ("INFER_IMGSZ", int, 640),
+    # FP16 inference. The RTX-class GPU runs half natively; on CPU it is
+    # ignored, since fp16 there is emulated and slower.
+    ("INFER_HALF", bool, True),
+
+    # Cap on the main loop's rate. This camera measures ~20 fps, and read_latest
+    # already blocks for a genuinely new frame, so the cap rarely binds here -
+    # it exists so a faster source can't spin the loop re-processing frames the
+    # camera hasn't replaced yet. 0 disables the cap.
+    ("TARGET_FPS", float, 30.0),
+
     ("PERSON_CLASS_ID", int, 0),
     ("CONF_THRESHOLD", float, 0.5),
     ("DISPLAY_MAX_WIDTH", int, 1280),
@@ -46,11 +61,21 @@ _SCHEMA = [
     ("BOX_SMOOTHING_ALPHA", float, 0.4),
     ("BOX_COAST_FRAMES", int, 5),
 
-    ("REID_MATCH_THRESHOLD", float, 0.4),
+    ("REID_MATCH_THRESHOLD", float, 0.35),
+    ("REID_BORDERLINE_THRESHOLD", float, 0.30),
+    ("REID_CORROBORATION_THRESHOLD", float, 0.25),
+    ("REID_CORROBORATION_MIN_SAMPLES", int, 2),
+    ("REID_HIGH_CONF_THRESHOLD", float, 0.6),
+    ("REID_TOPK_MATCH", int, 3),
     ("REID_TOPUP_INTERVAL_SECONDS", float, 2.0),
     ("REID_MAX_SAMPLES_PER_PERSON", int, 5),
 
     ("FACE_MATCH_THRESHOLD", float, 0.5),
+    # Bar for bypassing a live-track rejection on a FACE match (separate from
+    # REID_HIGH_CONF_THRESHOLD, which is calibrated for body-embedding scale).
+    # Must sit well above the same-person face-sim distribution so only an
+    # unusually strong match self-heals a tracker split.
+    ("FACE_HIGH_CONF_THRESHOLD", float, 0.55),
     ("FACE_MAX_SAMPLES_PER_PERSON", int, 5),
     ("FACE_MIN_BOX_HEIGHT", int, 40),
 
@@ -60,6 +85,17 @@ _SCHEMA = [
     ("EXIT_GRACE_SECONDS", float, 1.0),
 
     ("PROFILE_REPORT_INTERVAL", int, 60),
+
+    # MJPEG stream quality. OpenCV defaults to 95, which is near-lossless and
+    # costs both encode time and bandwidth; 75 is visually near-identical for a
+    # monitoring feed at a fraction of the bytes, so frames reach the browser
+    # sooner.
+    ("JPEG_QUALITY", int, 75),
+
+    # Fraction of a detection box that must fall inside an ignore zone for the
+    # detection to be discarded. Ignore zones test the whole box, not the foot
+    # point, so a person shown on a TV is dropped wherever they sit on screen.
+    ("IGNORE_ZONE_MIN_OVERLAP", float, 0.5),
 
     # Paths: relative values are resolved against the script directory.
     ("ZONES_PATH", str, "door_zones.json"),
@@ -77,9 +113,17 @@ _SCHEMA = [
     # ntfy.sh push notifications for zone alerts (empty topic disables).
     ("NTFY_SERVER", str, "https://ntfy.sh"),
     ("NTFY_TOPIC", str, ""),
+
+    # ReID training-data collection (off by default). When enabled, saves
+    # identified/topped-up crops to <DATASET_PATH>/<person_id>/ for later use
+    # in fine-tuning a ReID model. Purely additive - no effect on live matching.
+    ("DATASET_COLLECTION_ENABLED", bool, False),
+    ("DATASET_PATH", str, "dataset"),
+    ("DATASET_MAX_SAMPLES_PER_PERSON", int, 200),
+    ("DATASET_MIN_SAVE_INTERVAL_SECONDS", float, 1.0),
 ]
 
-_PATH_KEYS = {"ZONES_PATH", "ZONES_VERSION_PATH", "PEOPLE_PATH", "GALLERY_PATH"}
+_PATH_KEYS = {"ZONES_PATH", "ZONES_VERSION_PATH", "PEOPLE_PATH", "GALLERY_PATH", "DATASET_PATH"}
 
 
 def _coerce(value, py_type):

@@ -39,8 +39,14 @@ GALLERY_PATH = _cfg.GALLERY_PATH
 GALLERY_SAVE_INTERVAL_SECONDS = _cfg.GALLERY_SAVE_INTERVAL_SECONDS
 REID_MODEL_NAME = _cfg.REID_MODEL_NAME
 REID_MATCH_THRESHOLD = _cfg.REID_MATCH_THRESHOLD
+REID_BORDERLINE_THRESHOLD = _cfg.REID_BORDERLINE_THRESHOLD
+REID_CORROBORATION_THRESHOLD = _cfg.REID_CORROBORATION_THRESHOLD
+REID_CORROBORATION_MIN_SAMPLES = _cfg.REID_CORROBORATION_MIN_SAMPLES
+REID_HIGH_CONF_THRESHOLD = _cfg.REID_HIGH_CONF_THRESHOLD
+REID_TOPK_MATCH = _cfg.REID_TOPK_MATCH
 REID_MAX_SAMPLES_PER_PERSON = _cfg.REID_MAX_SAMPLES_PER_PERSON
 FACE_MATCH_THRESHOLD = _cfg.FACE_MATCH_THRESHOLD
+FACE_HIGH_CONF_THRESHOLD = _cfg.FACE_HIGH_CONF_THRESHOLD
 FACE_MAX_SAMPLES_PER_PERSON = _cfg.FACE_MAX_SAMPLES_PER_PERSON
 FACE_MIN_BOX_HEIGHT = _cfg.FACE_MIN_BOX_HEIGHT
 
@@ -208,14 +214,37 @@ class PersonGallery:
             if self._dirty:
                 self._write()
 
-    def _best_match(self, embedding, bank_dict):
-        best_id, best_sim = None, -1.0
+    def _best_match(self, embedding, bank_dict, top_k=1):
+        """Compare `embedding` against every person's bank and return the
+        id with the highest score, where a person's score is the mean of
+        their top-`top_k` per-sample similarities (falling back to fewer
+        samples for banks smaller than top_k), plus that same winner's
+        single-best per-sample similarity. top_k=1 reproduces plain
+        single-best-sample matching (in which case both returned scores
+        are identical).
+
+        Averaging the top few samples (instead of just the single closest
+        one) protects against a person being permanently unmatchable after
+        one atypical/noisy early sighting, since a fresh bank of only 1-2
+        samples has no averaging to smooth that out - the "cold-bank"
+        fragmentation case this is meant to fix. The single-best score is
+        kept alongside it for callers deciding whether a match is strong
+        enough to override a same-person conflict: a below-threshold mean
+        can still hide a genuinely high-confidence best-sample match, e.g.
+        one unusual pose among the candidate crops pulling the average
+        down."""
+        best_id, best_sim, best_top_sim = None, -1.0, -1.0
         for person_id, bank in bank_dict.items():
-            for gallery_emb in bank:
-                sim = float(np.dot(embedding, gallery_emb))
-                if sim > best_sim:
-                    best_id, best_sim = person_id, sim
-        return best_id, best_sim
+            sims = sorted((float(np.dot(embedding, e)) for e in bank), reverse=True)
+            if not sims:
+                continue
+            sim = sum(sims[:top_k]) / min(top_k, len(sims))
+            if sim > best_sim:
+                best_id, best_sim, best_top_sim = person_id, sim, sims[0]
+        return best_id, best_sim, best_top_sim
+
+    def _corroboration_count(self, embedding, bank, threshold):
+        return sum(1 for e in bank if float(np.dot(embedding, e)) >= threshold)
 
     def _new_id(self):
         person_id = self._next_id
@@ -235,7 +264,12 @@ class PersonGallery:
         best-matching person_id is rejected (e.g. because it already has
         another live track - a ReID false-positive merge), a new Person-N is
         minted instead of attaching to it, and none of this track's samples
-        are added to the rejected person's bank."""
+        are added to the rejected person's bank. The rejection is bypassed
+        for a high-confidence match (face_sim >= FACE_MATCH_THRESHOLD, or
+        body_sim >= REID_HIGH_CONF_THRESHOLD): a match that strong is taken
+        to mean the tracker split one person into two tracks, not that a
+        second person appeared, so the live track it conflicts with is
+        trusted to be stale rather than blocking the merge."""
         normalized = []
         for embedding in embeddings:
             norm = np.linalg.norm(embedding)
@@ -248,13 +282,28 @@ class PersonGallery:
             if fn >= 1e-12:
                 face_norm = face_embedding / fn
 
-        face_id, face_sim = (None, -1.0)
+        face_id, face_sim, face_top_sim = (None, -1.0, -1.0)
         if face_norm is not None:
-            face_id, face_sim = self._best_match(face_norm, self._face_embeddings)
+            face_id, face_sim, face_top_sim = self._best_match(face_norm, self._face_embeddings)
+            face_all = {
+                pid: round(max((float(np.dot(face_norm, e)) for e in bank), default=-1.0), 3)
+                for pid, bank in self._face_embeddings.items()
+            }
+            print(f"[IDENTITY-DEBUG] FACE scores vs gallery: {face_all} "
+                  f"(threshold={FACE_MATCH_THRESHOLD:.2f}, best=Person-{face_id} sim={face_sim:.3f})")
 
-        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD and (
-            reject_id is None or not reject_id(face_id)
-        ):
+        face_rejected = False
+        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD and reject_id is not None and reject_id(face_id):
+            if face_sim >= FACE_HIGH_CONF_THRESHOLD:
+                print(f"[IDENTITY] Person-{face_id} has another live track but FACE match is "
+                      f"high-confidence (sim={face_sim:.2f} >= {FACE_HIGH_CONF_THRESHOLD:.2f}) - "
+                      f"trusting it as a tracker split and absorbing the stale track.")
+            else:
+                face_rejected = True
+                print(f"[IDENTITY] Rejected FACE match to Person-{face_id} (sim={face_sim:.2f}): "
+                      f"already has another live track - minting new identity instead.")
+
+        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD and not face_rejected:
             person_id = face_id
             with self._lock:
                 self._face_embeddings[person_id].append(face_norm)
@@ -265,23 +314,57 @@ class PersonGallery:
                 self.save()
             print(f"[IDENTITY] Person-{person_id} reused via FACE match (sim={face_sim:.2f})")
             return person_id
-        if face_id is not None and face_sim >= FACE_MATCH_THRESHOLD:
-            print(f"[IDENTITY] Rejected FACE match to Person-{face_id} (sim={face_sim:.2f}): "
-                  f"already has another live track - minting new identity instead.")
 
-        body_id, body_sim = (None, -1.0)
+        body_id, body_sim, body_top_sim, body_embedding = (None, -1.0, -1.0, None)
         for embedding in normalized:
-            cand_id, cand_sim = self._best_match(embedding, self._embeddings)
+            cand_id, cand_sim, cand_top_sim = self._best_match(
+                embedding, self._embeddings, top_k=REID_TOPK_MATCH
+            )
             if cand_sim > body_sim:
-                body_id, body_sim = cand_id, cand_sim
+                body_id, body_sim, body_top_sim, body_embedding = cand_id, cand_sim, cand_top_sim, embedding
+
+        if normalized:
+            body_all = {
+                pid: round(
+                    max(
+                        (
+                            sum(sorted((float(np.dot(e, s)) for s in bank), reverse=True)[:REID_TOPK_MATCH])
+                            / min(REID_TOPK_MATCH, len(bank))
+                            for e in normalized
+                        ),
+                        default=-1.0,
+                    ),
+                    3,
+                )
+                for pid, bank in self._embeddings.items() if bank
+            }
+            print(f"[IDENTITY-DEBUG] BODY scores vs gallery: {body_all} "
+                  f"(match_thr={REID_MATCH_THRESHOLD:.2f}, borderline_thr={REID_BORDERLINE_THRESHOLD:.2f}, "
+                  f"best=Person-{body_id} sim={body_sim:.3f})")
+
+        body_match_ok = body_id is not None and body_sim >= REID_MATCH_THRESHOLD
+        if body_id is not None and REID_BORDERLINE_THRESHOLD <= body_sim < REID_MATCH_THRESHOLD:
+            corroborated = self._corroboration_count(
+                body_embedding, self._embeddings[body_id], REID_CORROBORATION_THRESHOLD
+            ) >= REID_CORROBORATION_MIN_SAMPLES
+            if corroborated:
+                body_match_ok = True
+                print(f"[IDENTITY] Borderline BODY match to Person-{body_id} (sim={body_sim:.2f}) "
+                      f"accepted via corroboration")
 
         body_rejected = False
-        if body_id is not None and body_sim >= REID_MATCH_THRESHOLD and reject_id is not None and reject_id(body_id):
+        if (body_id is not None and body_match_ok and reject_id is not None
+                and reject_id(body_id) and body_top_sim < REID_HIGH_CONF_THRESHOLD):
             body_rejected = True
             print(f"[IDENTITY] Rejected BODY match to Person-{body_id} (sim={body_sim:.2f}): "
                   f"already has another live track - minting new identity instead.")
+        elif (body_id is not None and body_match_ok and reject_id is not None
+                and reject_id(body_id)):
+            print(f"[IDENTITY] Person-{body_id} has another live track but BODY match is "
+                  f"high-confidence (sim={body_sim:.2f} >= {REID_HIGH_CONF_THRESHOLD:.2f}) - "
+                  f"trusting it as a tracker split and absorbing the stale track.")
 
-        if body_id is not None and body_sim >= REID_MATCH_THRESHOLD and not body_rejected:
+        if body_id is not None and body_match_ok and not body_rejected:
             person_id = body_id
             print(f"[IDENTITY] Person-{person_id} reused via BODY match (sim={body_sim:.2f}, face_sim={face_sim:.2f})")
         elif not normalized and face_norm is None:

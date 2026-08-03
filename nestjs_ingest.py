@@ -38,7 +38,7 @@ def send_detection(person_id, timestamp, zone_id=None, zone_event=None):
 
 
 def _post(payload):
-    url = f"{NESTJS_INGEST_URL}/ingest/detections"
+    url = f"{NESTJS_INGEST_URL}/ingest/detection"
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-Api-Key": NESTJS_API_KEY}
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")

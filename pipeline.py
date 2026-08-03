@@ -280,7 +280,11 @@ class DetectionState:
                 self._scale = scale
             if zone_status is not None:
                 self._zone_status = {
-                    zone_id: {"occupants": set(info["occupants"]), "entered": info["entered"]}
+                    zone_id: {
+                        "occupants": set(info["occupants"]),
+                        "entered": info["entered"],
+                        "left": info["left"],
+                    }
                     for zone_id, info in zone_status.items()
                 }
             if live_boxes is not None:
@@ -293,7 +297,11 @@ class DetectionState:
     def zone_status(self):
         with self._lock:
             return {
-                zone_id: {"occupants": set(info["occupants"]), "entered": info["entered"]}
+                zone_id: {
+                    "occupants": set(info["occupants"]),
+                    "entered": info["entered"],
+                    "left": info["left"],
+                }
                 for zone_id, info in self._zone_status.items()
             }
 
@@ -378,6 +386,30 @@ def compute_seen_track_ids(track_ids, ignored_track_ids):
     if track_ids is None:
         return set()
     return {int(tid) for tid in track_ids.tolist()} - ignored_track_ids
+
+
+def _compute_zone_status(web_zones, zone_occupants_now, zone_occupants_prev):
+    """Pure, per-zone occupancy diff with no side effects and no reference to
+    individual person_ids (it only ever looks at zone-level occupant sets),
+    which keeps it unit-testable in isolation. Returns, per zone id:
+    {"occupants": set, "entered": bool, "left": bool}. "entered" is True if
+    anyone newly arrived in the zone this frame; "left" is True if anyone who
+    was in the zone last frame is no longer there this frame. The two are not
+    mutually exclusive -- one person can leave while another enters the same
+    zone in the same frame."""
+    zone_status = {}
+    for wz in web_zones:
+        zone_id = wz["id"]
+        occupants_now = zone_occupants_now.get(zone_id, set())
+        occupants_prev = zone_occupants_prev.get(zone_id, set())
+        entered = bool(occupants_now - occupants_prev)
+        left = bool(occupants_prev - occupants_now)
+        zone_status[zone_id] = {
+            "occupants": occupants_now,
+            "entered": entered,
+            "left": left,
+        }
+    return zone_status
 
 
 def run_detection(state=None, show_window=True):
@@ -770,13 +802,9 @@ def run_detection(state=None, show_window=True):
                     present_person_ids.discard(person_id)
                     event_log.record(person_id, "exit", track_id=missing_track_id)
 
-            zone_status = {}
-            for wz in web_zones:
-                zone_id = wz["id"]
-                occupants_now = zone_occupants_now.get(zone_id, set())
-                occupants_prev = zone_occupants_prev.get(zone_id, set())
-                entered = bool(occupants_now - occupants_prev)
-                zone_status[zone_id] = {"occupants": occupants_now, "entered": entered}
+            zone_status = _compute_zone_status(
+                web_zones, zone_occupants_now, zone_occupants_prev
+            )
             zone_occupants_prev = {
                 wz["id"]: zone_occupants_now.get(wz["id"], set()) for wz in web_zones
             }

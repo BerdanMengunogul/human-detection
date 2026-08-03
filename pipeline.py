@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -33,6 +34,7 @@ from zones import (
 from events import EventLog
 from stream import LatestFrameReader, open_stream
 from dataset_collector import DatasetCollector
+import nestjs_ingest
 
 _cfg = _config.load()
 
@@ -670,6 +672,7 @@ def run_detection(state=None, show_window=True):
                     if should_enter(new_person_id, present_person_ids):
                         present_person_ids.add(new_person_id)
                         event_log.record(new_person_id, "enter", track_id=track_id)
+                        nestjs_ingest.send_detection(new_person_id, datetime.now(timezone.utc).isoformat())
                 else:
                     last_topup = track_last_topup_time.setdefault(track_id, time.time())
                     if time.time() - last_topup >= REID_TOPUP_INTERVAL_SECONDS:
@@ -801,10 +804,24 @@ def run_detection(state=None, show_window=True):
                 if should_exit(still_present, person_id, present_person_ids):
                     present_person_ids.discard(person_id)
                     event_log.record(person_id, "exit", track_id=missing_track_id)
+                    nestjs_ingest.send_detection(person_id, datetime.now(timezone.utc).isoformat())
 
             zone_status = _compute_zone_status(
                 web_zones, zone_occupants_now, zone_occupants_prev
             )
+            for wz in web_zones:
+                zone_id = wz["id"]
+                occupants_now = zone_occupants_now.get(zone_id, set())
+                occupants_prev = zone_occupants_prev.get(zone_id, set())
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for arrived_person_id in occupants_now - occupants_prev:
+                    nestjs_ingest.send_detection(
+                        arrived_person_id, now_iso, zone_id=zone_id, zone_event="enter"
+                    )
+                for left_person_id in occupants_prev - occupants_now:
+                    nestjs_ingest.send_detection(
+                        left_person_id, now_iso, zone_id=zone_id, zone_event="leave"
+                    )
             zone_occupants_prev = {
                 wz["id"]: zone_occupants_now.get(wz["id"], set()) for wz in web_zones
             }

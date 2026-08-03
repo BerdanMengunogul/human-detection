@@ -87,6 +87,13 @@
 # NTFY_SERVER: https://ntfy.sh
 # NTFY_TOPIC: ""
 
+# --- NestJS dashboard ingest ---
+# Set NESTJS_INGEST_URL to enable; leave empty/unset to disable. Points at
+# a running people-counter-nestjs API instance (see that sibling repo).
+# NESTJS_INGEST_URL: ""
+# NESTJS_API_KEY: ""
+# NESTJS_CAMERA_ID: "front-door"
+
 # --- ReID training-data collection ---
 # Off by default. When enabled, saves identified/topped-up person crops to
 # <DATASET_PATH>/<person_id>/ for later use in fine-tuning a ReID model.

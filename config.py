@@ -114,6 +114,10 @@ _SCHEMA = [
     ("NTFY_SERVER", str, "https://ntfy.sh"),
     ("NTFY_TOPIC", str, ""),
 
+    # NestJS dashboard ingest (empty URL disables).
+    ("NESTJS_INGEST_URL", str, ""),
+    ("NESTJS_API_KEY", str, ""),
+
     # ReID training-data collection (off by default). When enabled, saves
     # identified/topped-up crops to <DATASET_PATH>/<person_id>/ for later use
     # in fine-tuning a ReID model. Purely additive - no effect on live matching.

@@ -414,6 +414,7 @@ const TASK_LABELS = {
   none: "No task",
   alert_entry: "Alert on entry",
   alert_presence: "Alert on presence",
+  alert_leave: "Alert on leave",
   ignore: "Ignore (don't scan)",
 };
 

@@ -4,10 +4,10 @@
 # this file. RTSP camera credentials are NOT configured here - see .env.
 
 # --- Model paths ---
-# MODEL_NAME: yolov8s.pt
-# REID_MODEL_NAME: yolo26m-reid.onnx
+# MODEL_NAME: models/yolov8s.pt
+# REID_MODEL_NAME: models/yolo26m-reid.onnx
 # TRACKER_CONFIG: tracker_reid.yaml
-# POSE_MODEL_NAME: yolov8s-pose.pt
+# POSE_MODEL_NAME: models/yolov8s-pose.pt
 
 # --- Performance ---
 # Inference input size for both the detect and pose models. The camera is
@@ -68,10 +68,10 @@
 # PROFILE_REPORT_INTERVAL: 60
 
 # --- Paths (relative values resolve against this file's directory) ---
-# ZONES_PATH: door_zones.json
-# ZONES_VERSION_PATH: door_zones.version
-# PEOPLE_PATH: people.json
-# GALLERY_PATH: gallery.npz
+# ZONES_PATH: data/door_zones.json
+# ZONES_VERSION_PATH: data/door_zones.version
+# PEOPLE_PATH: data/people.json
+# GALLERY_PATH: data/gallery.npz
 
 # --- Database (PostgreSQL) ---
 # DB_PASSWORD is NOT configured here - see .env.

@@ -25,10 +25,10 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # (name, type, default) - default is the pre-existing hardcoded value.
 _SCHEMA = [
-    ("MODEL_NAME", str, "yolov8s.pt"),
-    ("REID_MODEL_NAME", str, "yolo26m-reid.onnx"),
+    ("MODEL_NAME", str, "models/yolov8s.pt"),
+    ("REID_MODEL_NAME", str, "models/yolo26m-reid.onnx"),
     ("TRACKER_CONFIG", str, "tracker_reid.yaml"),
-    ("POSE_MODEL_NAME", str, "yolov8s-pose.pt"),
+    ("POSE_MODEL_NAME", str, "models/yolov8s-pose.pt"),
     ("POSE_ENABLED", bool, True),
     ("POSE_EVERY_N_FRAMES", int, 1),
 
@@ -98,10 +98,10 @@ _SCHEMA = [
     ("IGNORE_ZONE_MIN_OVERLAP", float, 0.5),
 
     # Paths: relative values are resolved against the script directory.
-    ("ZONES_PATH", str, "door_zones.json"),
-    ("ZONES_VERSION_PATH", str, "door_zones.version"),
-    ("PEOPLE_PATH", str, "people.json"),
-    ("GALLERY_PATH", str, "gallery.npz"),
+    ("ZONES_PATH", str, "data/door_zones.json"),
+    ("ZONES_VERSION_PATH", str, "data/door_zones.version"),
+    ("PEOPLE_PATH", str, "data/people.json"),
+    ("GALLERY_PATH", str, "data/gallery.npz"),
     ("GALLERY_SAVE_INTERVAL_SECONDS", float, 5.0),
 
     # Database (PostgreSQL) - DB_PASSWORD is NOT here, see .env.
@@ -128,7 +128,10 @@ _SCHEMA = [
     ("DATASET_MIN_SAVE_INTERVAL_SECONDS", float, 1.0),
 ]
 
-_PATH_KEYS = {"ZONES_PATH", "ZONES_VERSION_PATH", "PEOPLE_PATH", "GALLERY_PATH", "DATASET_PATH"}
+_PATH_KEYS = {
+    "ZONES_PATH", "ZONES_VERSION_PATH", "PEOPLE_PATH", "GALLERY_PATH", "DATASET_PATH",
+    "MODEL_NAME", "REID_MODEL_NAME", "TRACKER_CONFIG", "POSE_MODEL_NAME",
+}
 
 
 def _coerce(value, py_type):

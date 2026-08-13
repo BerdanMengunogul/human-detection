@@ -33,6 +33,7 @@ from zones import (
 )
 from stream import LatestFrameReader, open_stream
 from dataset_collector import DatasetCollector
+from events import EventLog, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 import nestjs_ingest
 
 _cfg = _config.load()
@@ -418,6 +419,7 @@ def run_detection(state=None, show_window=True):
     reid_encoder = load_reid_encoder()
     face_analyzer = load_face_analyzer()
     gallery = PersonGallery()
+    event_log = EventLog(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
     dataset_collector = DatasetCollector(_cfg)
     track_to_person = {}  # BoT-SORT track_id -> Person-N id (persists until track drops)
     pending_tracks = {}  # track_id -> list of (score, bbox crop, local xywh) candidates
@@ -476,6 +478,7 @@ def run_detection(state=None, show_window=True):
             if state is not None and state.consume_reset_request():
                 print("[RESET] Clearing gallery, tracking state, and event history.")
                 gallery.reset()
+                event_log.reset()
                 track_to_person.clear()
                 pending_tracks.clear()
                 pending_track_first_seen.clear()
@@ -664,6 +667,7 @@ def run_detection(state=None, show_window=True):
                     new_person_id = track_to_person[track_id]
                     if should_enter(new_person_id, present_person_ids):
                         present_person_ids.add(new_person_id)
+                        event_log.record(new_person_id, "enter", track_id=track_id)
                         nestjs_ingest.send_detection(new_person_id, datetime.now(timezone.utc).isoformat())
                 else:
                     last_topup = track_last_topup_time.setdefault(track_id, time.time())
@@ -795,6 +799,7 @@ def run_detection(state=None, show_window=True):
                 person_in_zone.pop(person_id, None)
                 if should_exit(still_present, person_id, present_person_ids):
                     present_person_ids.discard(person_id)
+                    event_log.record(person_id, "exit", track_id=missing_track_id)
                     nestjs_ingest.send_detection(person_id, datetime.now(timezone.utc).isoformat())
 
             zone_status = _compute_zone_status(
@@ -874,5 +879,6 @@ def run_detection(state=None, show_window=True):
         if show_window:
             cv2.destroyAllWindows()
         gallery.flush()
+        event_log.close()
         if state is not None:
             state.mark_running(False)

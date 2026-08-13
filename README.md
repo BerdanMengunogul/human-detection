@@ -56,8 +56,6 @@ scripts/                  One-off/maintenance scripts: seed_gallery, train_reid,
                            relabel_tool, inspect_dataset_mixing, widen_ignore_zone
 tools/                    analyze_log.py, run_test.py — log analysis / test running helpers
 tests/                    pytest unit tests for zone enter/exit/status logic and track-id bookkeeping
-docs/SETUP.md             Detailed setup: dashboard auth, PostgreSQL, GPU/CUDA DLL wiring, pinned versions
-docs/IMPROVEMENT_PLAN.md  Design notes / planned work
 config.yaml.example       Template for config.yaml (gitignored; non-secret local config)
 .env.example              Template for .env (gitignored; secrets — DB password, RTSP credentials)
 ```
@@ -67,8 +65,6 @@ weights), `gallery.npz` (ReID embedding gallery), `people.json` (id-to-name mapp
 `door_zones.version`, `*.db*`, `dataset/`, `dataset_named/`, `contact_sheets/`, log/output files.
 
 ## Setup
-
-See [`docs/SETUP.md`](docs/SETUP.md) for full details. Summary:
 
 1. **Python deps** — `pip install -r requirements.txt`. Pinned for a matched GPU stack: PyTorch
    2.13.0+cu126, torchvision 0.28.0+cu126, onnxruntime-gpu 1.21.1, requires CUDA driver ≥560.xx.

@@ -12,7 +12,8 @@ door_zones.version
 *.onnx
 .env
 config.yaml
-.claude/scheduled_tasks.lock
+.claude/
+docs/superpowers/
 /dataset/
 /dataset_named/
 /contact_sheets/

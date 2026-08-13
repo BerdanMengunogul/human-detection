@@ -21,3 +21,4 @@ config.yaml
 *.png
 *.bak-*
 dashboard_pid.txt
+nestjs_ingest_backlog.jsonl

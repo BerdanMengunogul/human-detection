@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -30,9 +31,10 @@ from zones import (
     box_in_any_ignore_zone,
     split_ignore_zones,
 )
-from events import EventLog
 from stream import LatestFrameReader, open_stream
 from dataset_collector import DatasetCollector
+from events import EventLog, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+import nestjs_ingest
 
 _cfg = _config.load()
 
@@ -93,12 +95,6 @@ FACE_MIN_BOX_HEIGHT = _cfg.FACE_MIN_BOX_HEIGHT
 REID_TOPUP_INTERVAL_SECONDS = _cfg.REID_TOPUP_INTERVAL_SECONDS
 IDENTIFY_DELAY_SECONDS = _cfg.IDENTIFY_DELAY_SECONDS
 IDENTIFY_MIN_CANDIDATES = _cfg.IDENTIFY_MIN_CANDIDATES
-
-DB_HOST = _cfg.DB_HOST
-DB_PORT = _cfg.DB_PORT
-DB_NAME = _cfg.DB_NAME
-DB_USER = _cfg.DB_USER
-DB_PASSWORD = _cfg.DB_PASSWORD
 
 ZONES_PATH = _cfg.ZONES_PATH
 
@@ -280,7 +276,11 @@ class DetectionState:
                 self._scale = scale
             if zone_status is not None:
                 self._zone_status = {
-                    zone_id: {"occupants": set(info["occupants"]), "entered": info["entered"]}
+                    zone_id: {
+                        "occupants": set(info["occupants"]),
+                        "entered": info["entered"],
+                        "left": info["left"],
+                    }
                     for zone_id, info in zone_status.items()
                 }
             if live_boxes is not None:
@@ -293,7 +293,11 @@ class DetectionState:
     def zone_status(self):
         with self._lock:
             return {
-                zone_id: {"occupants": set(info["occupants"]), "entered": info["entered"]}
+                zone_id: {
+                    "occupants": set(info["occupants"]),
+                    "entered": info["entered"],
+                    "left": info["left"],
+                }
                 for zone_id, info in self._zone_status.items()
             }
 
@@ -380,6 +384,30 @@ def compute_seen_track_ids(track_ids, ignored_track_ids):
     return {int(tid) for tid in track_ids.tolist()} - ignored_track_ids
 
 
+def _compute_zone_status(web_zones, zone_occupants_now, zone_occupants_prev):
+    """Pure, per-zone occupancy diff with no side effects and no reference to
+    individual person_ids (it only ever looks at zone-level occupant sets),
+    which keeps it unit-testable in isolation. Returns, per zone id:
+    {"occupants": set, "entered": bool, "left": bool}. "entered" is True if
+    anyone newly arrived in the zone this frame; "left" is True if anyone who
+    was in the zone last frame is no longer there this frame. The two are not
+    mutually exclusive -- one person can leave while another enters the same
+    zone in the same frame."""
+    zone_status = {}
+    for wz in web_zones:
+        zone_id = wz["id"]
+        occupants_now = zone_occupants_now.get(zone_id, set())
+        occupants_prev = zone_occupants_prev.get(zone_id, set())
+        entered = bool(occupants_now - occupants_prev)
+        left = bool(occupants_prev - occupants_now)
+        zone_status[zone_id] = {
+            "occupants": occupants_now,
+            "entered": entered,
+            "left": left,
+        }
+    return zone_status
+
+
 def run_detection(state=None, show_window=True):
     """Runs the detection loop. If `state` (a DetectionState) is given, every
     annotated frame is published there for a web server to stream; if
@@ -391,8 +419,8 @@ def run_detection(state=None, show_window=True):
     reid_encoder = load_reid_encoder()
     face_analyzer = load_face_analyzer()
     gallery = PersonGallery()
-    dataset_collector = DatasetCollector(_cfg)
     event_log = EventLog(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+    dataset_collector = DatasetCollector(_cfg)
     track_to_person = {}  # BoT-SORT track_id -> Person-N id (persists until track drops)
     pending_tracks = {}  # track_id -> list of (score, bbox crop, local xywh) candidates
     pending_track_first_seen = {}  # track_id -> time.time() when first added to pending_tracks
@@ -413,6 +441,7 @@ def run_detection(state=None, show_window=True):
 
     web_zones_store = WebZonesStore()
     web_zones, ignore_zones = split_ignore_zones(web_zones_store.zones)
+    nestjs_ingest.sync_zones(web_zones)
     if web_zones:
         print(f"[ZONES] Loaded {len(web_zones)} door zone(s) from {ZONES_PATH}")
     else:
@@ -465,6 +494,7 @@ def run_detection(state=None, show_window=True):
             if web_zones_store.maybe_reload():
                 web_zones, ignore_zones = split_ignore_zones(web_zones_store.zones)
                 zone_occupants_prev = merge_zone_occupants(zone_occupants_prev, web_zones)
+                nestjs_ingest.sync_zones(web_zones)
                 print(f"[ZONES] Reloaded {len(web_zones)} door zone(s), "
                       f"{len(ignore_zones)} ignore zone(s) from {ZONES_PATH}")
             # Pace the loop to TARGET_FPS. read_latest already blocks until the
@@ -638,6 +668,7 @@ def run_detection(state=None, show_window=True):
                     if should_enter(new_person_id, present_person_ids):
                         present_person_ids.add(new_person_id)
                         event_log.record(new_person_id, "enter", track_id=track_id)
+                        nestjs_ingest.send_detection(new_person_id, datetime.now(timezone.utc).isoformat())
                 else:
                     last_topup = track_last_topup_time.setdefault(track_id, time.time())
                     if time.time() - last_topup >= REID_TOPUP_INTERVAL_SECONDS:
@@ -769,14 +800,24 @@ def run_detection(state=None, show_window=True):
                 if should_exit(still_present, person_id, present_person_ids):
                     present_person_ids.discard(person_id)
                     event_log.record(person_id, "exit", track_id=missing_track_id)
+                    nestjs_ingest.send_detection(person_id, datetime.now(timezone.utc).isoformat())
 
-            zone_status = {}
+            zone_status = _compute_zone_status(
+                web_zones, zone_occupants_now, zone_occupants_prev
+            )
             for wz in web_zones:
                 zone_id = wz["id"]
                 occupants_now = zone_occupants_now.get(zone_id, set())
                 occupants_prev = zone_occupants_prev.get(zone_id, set())
-                entered = bool(occupants_now - occupants_prev)
-                zone_status[zone_id] = {"occupants": occupants_now, "entered": entered}
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for arrived_person_id in occupants_now - occupants_prev:
+                    nestjs_ingest.send_detection(
+                        arrived_person_id, now_iso, zone_id=zone_id, zone_event="enter"
+                    )
+                for left_person_id in occupants_prev - occupants_now:
+                    nestjs_ingest.send_detection(
+                        left_person_id, now_iso, zone_id=zone_id, zone_event="leave"
+                    )
             zone_occupants_prev = {
                 wz["id"]: zone_occupants_now.get(wz["id"], set()) for wz in web_zones
             }
@@ -837,7 +878,7 @@ def run_detection(state=None, show_window=True):
         reader.stop()
         if show_window:
             cv2.destroyAllWindows()
-        event_log.close()
         gallery.flush()
+        event_log.close()
         if state is not None:
             state.mark_running(False)

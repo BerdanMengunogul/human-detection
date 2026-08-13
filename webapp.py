@@ -391,7 +391,7 @@ def api_zones(_user: str = Depends(require_auth)):
     return JSONResponse(_load_zones_file()["web_zones"])
 
 
-VALID_ZONE_TASKS = {"none", "alert_entry", "alert_presence", "ignore"}
+VALID_ZONE_TASKS = {"none", "alert_entry", "alert_presence", "alert_leave", "ignore"}
 
 
 @app.post("/api/zones")
@@ -462,6 +462,8 @@ def _build_zone_status_payload():
             alert = len(occupants) > 0
         elif task == "alert_entry":
             alert = entered
+        elif task == "alert_leave":
+            alert = info.get("left", False)
 
         if alert and not _last_zone_alert.get(zone["id"], False):
             notify_zone_alert(zone["name"], task)

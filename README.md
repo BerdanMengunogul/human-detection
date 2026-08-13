@@ -1,3 +1,11 @@
+
+
+
+https://github.com/user-attachments/assets/e3361486-7819-4ffc-8b49-ee3eabc75d23
+<img width="1478" height="780" alt="Ekran görüntüsü 2026-07-31 122816" src="https://github.com/user-attachments/assets/1952e725-31af-4a41-b7e6-ab9ff7369279" />
+
+
+
 # human-detection
 
 A camera-based human detection and tracking pipeline with re-identification (ReID), zone-based
